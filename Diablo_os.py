@@ -9,11 +9,10 @@ import requests
 from datetime import datetime
 
 # =========================
-# CONFIGURATION
+# CONFIGURATION GLOBALE
 # =========================
-VERSION = "3.0.0"
+VERSION = "3.5.0"
 MEMORY_FILE = "diablo_neural_memory.json"
-# Lien direct vers votre fichier sur GitHub
 UPDATE_URL = "https://raw.githubusercontent.com/diallo65377-lgtm/Diablo/main/diablo_os.py"
 
 # =========================
@@ -36,6 +35,7 @@ class NeuralMemory:
         return {
             "patterns": {},
             "stats": {"actions": 0, "updates": 0},
+            "contacts": {}, # Stockage de numéros pour SMS
             "last_reboot": str(datetime.now())
         }
 
@@ -58,14 +58,47 @@ class NeuralMemory:
         patterns = self.data["patterns"].get(hour, {})
         if not patterns: return None
         best_action = max(patterns, key=patterns.get)
-        if patterns[best_action] >= 5: # Seuil d'apprentissage
+        if patterns[best_action] >= 3: # Seuil d'apprentissage réduit pour plus de réactivité
             return best_action
         return None
 
 # =========================
-# CERVEAUX ET LOGIQUE
+# INTERFACE TERMUX API PRO
+# =========================
+class TermuxAPI:
+    def execute(self, action, params=None):
+        cmds = {
+            "TORCH_ON": ["termux-torch", "on"],
+            "TORCH_OFF": ["termux-torch", "off"],
+            "BRIGHT_LOW": ["termux-brightness", "10"],
+            "BRIGHT_HIGH": ["termux-brightness", "255"],
+            "VIBRATE": ["termux-vibrate", "-d", "500"],
+            "WIFI_ON": ["termux-wifi-enable", "true"],
+            "WIFI_OFF": ["termux-wifi-enable", "false"],
+            "VOL_MUTE": ["termux-volume", "music", "0"],
+            "VOL_MAX": ["termux-volume", "music", "15"],
+            "PHOTO": ["termux-camera-photo", "-c", "0", f"/sdcard/diablo_{int(time.time())}.jpg"],
+            "SAY": ["termux-tts-speak"]
+        }
+        
+        if action in cmds:
+            full_cmd = cmds[action]
+            if action == "SAY" and params:
+                full_cmd.append(params)
+            subprocess.Popen(full_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def send_sms(self, number, message):
+        subprocess.Popen(["termux-sms-send", "-n", number, message])
+
+    def get_battery(self):
+        try: return json.loads(subprocess.check_output(["termux-battery-status"], timeout=2))
+        except: return {}
+
+# =========================
+# LES TROIS CERVEAUX
 # =========================
 class ExecutiveBrain:
+    """Cerveau A : Prend des décisions basées sur l'état et l'apprentissage."""
     def __init__(self, api, memory):
         self.api, self.memory = api, memory
         self.is_running = True
@@ -73,64 +106,58 @@ class ExecutiveBrain:
     def run(self):
         while self.is_running:
             try:
-                bat = self.api.get_battery().get("percentage", 100)
-                if bat < 15: self.api.execute("BRIGHT_LOW")
+                # 1. Gestion automatique de l'énergie
+                bat = self.api.get_battery()
+                level = bat.get("percentage", 100)
+                is_charging = bat.get("status") == "CHARGING"
+
+                if level < 15 and not is_charging:
+                    self.api.execute("BRIGHT_LOW")
+                    self.api.execute("WIFI_OFF")
                 
+                # 2. Exécution des habitudes apprises
                 prediction = self.memory.get_prediction()
                 if prediction:
                     self.api.execute(prediction)
-            except: pass
+                    
+            except Exception as e: pass
             time.sleep(60)
 
-class MaintenanceBrain:
-    def check_update(self):
-        try:
-            r = requests.get(UPDATE_URL, timeout=10)
-            if r.status_code == 200:
-                # Vérifie si le numéro de version dans le code distant est différent
-                if f'VERSION = "{VERSION}"' not in r.text:
-                    self.apply_update(r.text)
-        except: pass
-
-    def apply_update(self, content):
-        print(f"\n[Maintenance] Nouvelle version trouvée. Installation...")
-        with open(__file__, "w") as f:
-            f.write(content)
-        print("[Maintenance] Redémarrage...")
-        os.execv(sys.executable, ['python'] + sys.argv)
-
-    def run(self):
-        while True:
-            self.check_update()
-            time.sleep(1800) # Vérifie toutes les 30 minutes
-
 class SupervisorBrain:
+    """Cerveau B : Surveille les erreurs et la santé du système."""
     def __init__(self, b_a, b_c):
         self.b_a, self.b_c = b_a, b_c
 
     def run(self):
         while True:
-            if not self.b_a.is_running: self.b_a.is_running = True
-            time.sleep(60)
+            if not self.b_a.is_running:
+                self.b_a.is_running = True # Relance automatique
+            time.sleep(30)
+
+class MaintenanceBrain:
+    """Cerveau C : Gère les mises à jour et l'évolution du code."""
+    def __init__(self):
+        pass
+
+    def check_update(self):
+        try:
+            r = requests.get(UPDATE_URL, timeout=10)
+            if r.status_code == 200:
+                if f'VERSION = "{VERSION}"' not in r.text:
+                    print(f"\n[Maintenance] Mise à jour vers une nouvelle version...")
+                    with open(__file__, "w") as f:
+                        f.write(r.text)
+                    os.execv(sys.executable, ['python'] + sys.argv)
+        except: pass
+
+    def run(self):
+        while True:
+            self.check_update()
+            time.sleep(1800)
 
 # =========================
-# API & CORE
+# NOYAU CENTRAL
 # =========================
-class TermuxAPI:
-    def execute(self, action):
-        cmds = {
-            "TORCH_ON": ["termux-torch", "on"],
-            "TORCH_OFF": ["termux-torch", "off"],
-            "BRIGHT_LOW": ["termux-brightness", "10"],
-            "PHOTO": ["termux-camera-photo", "-c", "0", "/sdcard/diablo_auto.jpg"]
-        }
-        if action in cmds:
-            subprocess.Popen(cmds[action], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    def get_battery(self):
-        try: return json.loads(subprocess.check_output(["termux-battery-status"], timeout=2))
-        except: return {}
-
 class DiabloOS:
     def __init__(self):
         self.api = TermuxAPI()
@@ -141,25 +168,70 @@ class DiabloOS:
 
     def start(self):
         os.system("clear")
-        print(f"DIABLO OS v{VERSION}")
-        print(f"Lien Update: {UPDATE_URL}")
-        
+        print(f"====================================")
+        print(f"      DIABLO NEURAL OS v{VERSION}")
+        print(f"====================================")
+        print(f"[*] Apprentissage : ACTIF")
+        print(f"[*] Surveillance  : DOUBLE CERVEAU")
+        print(f"[*] Update URL    : {UPDATE_URL}")
+        print(f"------------------------------------")
+
         for thread in [self.brain_a.run, self.brain_b.run, self.brain_c.run]:
             threading.Thread(target=thread, daemon=True).start()
 
+        self.shell()
+
+    def shell(self):
         while True:
-            cmd = input(f"Diablo@{VERSION} # ").lower()
-            if cmd in ["exit", "update"]:
-                if cmd == "update": self.brain_c.check_update()
-                break
-            
-            action = None
-            if "on" in cmd: action = "TORCH_ON"
-            elif "off" in cmd: action = "TORCH_OFF"
-            
-            if action:
-                self.api.execute(action)
-                self.memory.learn(action)
+            try:
+                cmd = input(f"Diablo@{VERSION} # ").lower().strip()
+                if not cmd: continue
+                if cmd in ["exit", "quit"]: break
+                
+                # --- SYSTÈME DE COMMANDES ÉVOLUÉ ---
+                action = None
+                
+                # Gestion Lumière
+                if "lampe on" in cmd: action = "TORCH_ON"
+                elif "lampe off" in cmd: action = "TORCH_OFF"
+                
+                # Gestion Média / Audio
+                elif "chut" in cmd or "silence" in cmd:
+                    self.api.execute("VOL_MUTE")
+                    self.api.execute("VIBRATE")
+                    print("| Diablo |: Mode silencieux activé.")
+                elif "son max" in cmd: action = "VOL_MAX"
+                elif "dit" in cmd:
+                    text = cmd.replace("dit", "").strip()
+                    self.api.execute("SAY", text)
+                
+                # Gestion Réseau
+                elif "wifi on" in cmd: action = "WIFI_ON"
+                elif "wifi off" in cmd: action = "WIFI_OFF"
+                
+                # Gestion Capteurs
+                elif "photo" in cmd: action = "PHOTO"
+                elif "vibre" in cmd: action = "VIBRATE"
+                
+                # Gestion SMS (Format: sms 0612345678 message)
+                elif cmd.startswith("sms"):
+                    parts = cmd.split(" ", 2)
+                    if len(parts) >= 3:
+                        self.api.send_sms(parts[1], parts[2])
+                        print(f"| Diablo |: SMS envoyé vers {parts[1]}")
+                
+                # Commandes Système
+                elif "update" in cmd: self.brain_c.check_update()
+                elif "stats" in cmd:
+                    print(f"| Diablo |: Actions totales enregistrées: {self.memory.data['stats']['actions']}")
+
+                if action:
+                    self.api.execute(action)
+                    self.memory.learn(action)
+                    print(f"| Diablo |: Action {action} exécutée.")
+
+            except KeyboardInterrupt: break
+            except Exception as e: print(f"Erreur : {e}")
 
 if __name__ == "__main__":
     DiabloOS().start()
