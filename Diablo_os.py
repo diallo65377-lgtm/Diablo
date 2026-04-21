@@ -12,7 +12,7 @@ from datetime import datetime
 # =========================
 VERSION = "4.0.0"
 MEMORY_FILE = "diablo_memory.json"
-UPDATE_URL = "https://github.com/diallo65377-lgtm/Diablo/blob/main/Diablo_os.py"
+UPDATE_URL = "https://raw.githubusercontent.com/diallo65377-lgtm/Diablo/main/Diablo_os.py"
 
 # =========================
 # LOG
