@@ -10,8 +10,9 @@ from datetime import datetime
 # =========================
 # CONFIG
 # =========================
-VERSION = "4.0.0"
+VERSION = "4.1.0"
 MEMORY_FILE = "diablo_memory.json"
+BACKUP_FILE = "diablo_memory.bak.json"
 UPDATE_URL = "https://raw.githubusercontent.com/diallo65377-lgtm/Diablo/main/Diablo_os.py"
 
 # =========================
@@ -21,21 +22,12 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 # =========================
-# MÉMOIRE
+# MÉMOIRE ROBUSTE
 # =========================
 class NeuralMemory:
     def __init__(self):
         self.lock = threading.Lock()
         self.data = self.load()
-
-    def load(self):
-        if os.path.exists(MEMORY_FILE):
-            try:
-                with open(MEMORY_FILE, "r") as f:
-                    return json.load(f)
-            except:
-                return self.default()
-        return self.default()
 
     def default(self):
         return {
@@ -43,27 +35,89 @@ class NeuralMemory:
             "stats": {"actions": 0}
         }
 
+    def validate(self, data):
+        if not isinstance(data, dict):
+            return False
+        if "patterns" not in data:
+            return False
+        if "stats" not in data:
+            return False
+        return True
+
+    def load_file(self, path):
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except:
+            return None
+
+    def load(self):
+        # 1. Charger mémoire principale
+        data = self.load_file(MEMORY_FILE)
+
+        if self.validate(data):
+            return data
+
+        log("Mémoire principale corrompue, tentative backup...")
+
+        # 2. Charger backup
+        backup = self.load_file(BACKUP_FILE)
+
+        if self.validate(backup):
+            log("Backup chargé avec succès")
+            return backup
+
+        log("Aucune mémoire valide, reset")
+        return self.default()
+
+    def atomic_save(self, data):
+        temp_file = MEMORY_FILE + ".tmp"
+
+        try:
+            # écrire fichier temporaire
+            with open(temp_file, "w") as f:
+                json.dump(data, f, indent=2)
+
+            # sauvegarde backup
+            if os.path.exists(MEMORY_FILE):
+                os.replace(MEMORY_FILE, BACKUP_FILE)
+
+            # remplacement atomique
+            os.replace(temp_file, MEMORY_FILE)
+
+        except Exception as e:
+            log(f"Erreur sauvegarde: {e}")
+
     def save(self):
         with self.lock:
-            with open(MEMORY_FILE, "w") as f:
-                json.dump(self.data, f, indent=2)
+            self.atomic_save(self.data)
 
     def learn(self, action):
         hour = str(datetime.now().hour)
+
         with self.lock:
             self.data["patterns"].setdefault(hour, {})
             self.data["patterns"][hour][action] = self.data["patterns"][hour].get(action, 0) + 1
             self.data["stats"]["actions"] += 1
+
         self.save()
 
     def predict(self):
+        patterns = self.data.get("patterns", {})
         hour = str(datetime.now().hour)
-        patterns = self.data["patterns"].get(hour, {})
-        if not patterns:
+
+        if hour not in patterns:
             return None
-        best = max(patterns, key=patterns.get)
-        if patterns[best] >= 3:
+
+        actions = patterns[hour]
+        if not actions:
+            return None
+
+        best = max(actions, key=actions.get)
+
+        if actions[best] >= 3:
             return best
+
         return None
 
 # =========================
@@ -106,7 +160,7 @@ class TermuxAPI:
             return {}
 
 # =========================
-# CERVEAU PRINCIPAL
+# CERVEAU
 # =========================
 class ExecutiveBrain:
     def __init__(self, api, memory):
@@ -122,12 +176,11 @@ class ExecutiveBrain:
                 level = bat.get("percentage", 100)
                 charging = bat.get("status") == "CHARGING"
 
-                # Économie batterie
                 if level < 15 and not charging:
                     self.api.execute("WIFI_OFF")
 
-                # Prédiction
                 action = self.memory.predict()
+
                 if action:
                     now = time.time()
                     if action not in self.last_action or now - self.last_action[action] > 300:
@@ -141,7 +194,7 @@ class ExecutiveBrain:
             time.sleep(60)
 
 # =========================
-# MAINTENANCE
+# UPDATE
 # =========================
 class MaintenanceBrain:
     def check_update(self):
@@ -153,7 +206,7 @@ class MaintenanceBrain:
             new_code = r.text
 
             if "class DiabloOS" not in new_code:
-                log("Update rejeté (code invalide)")
+                log("Update rejeté")
                 return
 
             if f'VERSION = "{VERSION}"' in new_code:
@@ -167,7 +220,7 @@ class MaintenanceBrain:
             with open(__file__, "w") as f:
                 f.write(new_code)
 
-            log("Mise à jour OK, redémarrage")
+            log("Redémarrage")
             os.execv(sys.executable, ['python'] + sys.argv)
 
         except Exception as e:
@@ -209,7 +262,6 @@ class DiabloOS:
 
                 action = None
 
-                # COMMANDES
                 if cmd == "lampe on":
                     action = "TORCH_ON"
 
