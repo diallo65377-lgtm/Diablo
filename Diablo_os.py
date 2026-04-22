@@ -20,7 +20,7 @@ except ImportError:
 # =========================
 # CONFIG
 # =========================
-VERSION = "5.2.0"
+VERSION = "5.3.0"
 BASE_DIR = Path.home()
 MEMORY_FILE = BASE_DIR / "diablo_memory.json"
 BACKUP_FILE = BASE_DIR / "diablo_memory.bak.json"
@@ -33,11 +33,11 @@ MIN_PATTERN_COUNT = 3
 LOW_BATTERY_THRESHOLD = 15
 CRITICAL_BATTERY_THRESHOLD = 5
 
-# Modèle Claude utilisé
-CLAUDE_MODEL = "claude-haiku-4-5-20251001"
-CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
-CLAUDE_MAX_TOKENS = 512
-CLAUDE_HISTORY_MAX = 10  # Nombre max de messages gardés en mémoire de conversation
+# Groq API (gratuit et rapide)
+GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MAX_TOKENS = 512
+GROQ_HISTORY_MAX = 10
 
 # =========================
 # LOGGING — ne plante jamais
@@ -50,12 +50,10 @@ def setup_logging():
     logger = logging.getLogger("diablo")
     logger.setLevel(logging.DEBUG)
 
-    # Console toujours active
     ch = logging.StreamHandler(sys.stdout)
     ch.setFormatter(fmt)
     logger.addHandler(ch)
 
-    # Fichier log — optionnel, jamais bloquant
     try:
         if LOG_FILE.exists() and LOG_FILE.stat().st_size > 500_000:
             LOG_FILE.rename(LOG_FILE.with_suffix(".bak.log"))
@@ -68,7 +66,7 @@ def setup_logging():
     return logger
 
 logger = setup_logging()
-log     = logger.info
+log      = logger.info
 log_warn = logger.warning
 log_err  = logger.error
 log_dbg  = logger.debug
@@ -409,102 +407,99 @@ class MaintenanceBrain:
 
 
 # =========================
-# ASSISTANT CLAUDE IA
+# ASSISTANT IA (GROQ — GRATUIT)
 # =========================
-class ClaudeAssistant:
+class GroqAssistant:
     """
-    Gère les conversations avec Claude (Anthropic API).
-    Garde un historique de la conversation en cours.
+    Assistant IA utilisant Groq (gratuit et très rapide).
+    Utilise le format OpenAI (compatible Groq).
+    Garde un historique de la conversation.
     """
+
+    SYSTEM_PROMPT = (
+        "Tu es Diablo, un assistant IA intégré dans Diablo OS, "
+        "un système qui tourne sur Android via Termux. "
+        "Tu es utile, concis et tu parles toujours en français. "
+        "Tu peux aider avec des questions générales, "
+        "de la programmation Python, ou l'utilisation d'Android."
+    )
 
     def __init__(self, memory):
         self.memory = memory
-        # Historique de la conversation : liste de {"role": ..., "content": ...}
         self._history = []
         self._lock = threading.Lock()
 
     def _get_api_key(self):
-        key = self.memory.get_tag("claude_api_key")
-        return key
+        return self.memory.get_tag("groq_api_key")
 
     def ask(self, question):
-        """
-        Envoie une question à Claude et retourne la réponse.
-        Garde l'historique de la conversation.
-        """
         if not REQUESTS_AVAILABLE:
-            return "Erreur : le module 'requests' est absent.\nInstalle-le avec : pip install requests"
+            return "Erreur : installe 'requests' avec : pip install requests"
 
         api_key = self._get_api_key()
         if not api_key:
             return (
-                "Clé API Claude manquante !\n"
-                "Configure-la avec la commande :\n"
-                "  tag claude_api_key TA_CLE_ICI\n\n"
-                "Obtiens ta clé gratuite sur : https://console.anthropic.com"
+                "Clé API Groq manquante !\n"
+                "1. Va sur https://console.groq.com\n"
+                "2. Crée un compte gratuit\n"
+                "3. Va dans API Keys > Create API Key\n"
+                "4. Configure-la avec :\n"
+                "   tag groq_api_key gsk_XXXXXXXX"
             )
 
-        # Ajouter la question à l'historique
         with self._lock:
             self._history.append({"role": "user", "content": question})
-            # Limiter la taille de l'historique
-            if len(self._history) > CLAUDE_HISTORY_MAX * 2:
-                self._history = self._history[-(CLAUDE_HISTORY_MAX * 2):]
+            if len(self._history) > GROQ_HISTORY_MAX * 2:
+                self._history = self._history[-(GROQ_HISTORY_MAX * 2):]
             messages = list(self._history)
 
-        print("⏳ Claude réfléchit…", flush=True)
+        print("⚡ Groq réfléchit…", flush=True)
 
         try:
             response = requests.post(
-                CLAUDE_API_URL,
+                GROQ_API_URL,
                 headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
                 },
                 json={
-                    "model": CLAUDE_MODEL,
-                    "max_tokens": CLAUDE_MAX_TOKENS,
-                    "system": (
-                        "Tu es Diablo, un assistant IA intégré dans Diablo OS, "
-                        "un système qui tourne sur Android via Termux. "
-                        "Tu es utile, concis et parles français. "
-                        "Tu peux aider l'utilisateur avec des questions générales, "
-                        "de la programmation, ou l'utilisation de son téléphone."
-                    ),
-                    "messages": messages,
+                    "model": GROQ_MODEL,
+                    "max_tokens": GROQ_MAX_TOKENS,
+                    "messages": [
+                        {"role": "system", "content": self.SYSTEM_PROMPT},
+                        *messages,
+                    ],
                 },
                 timeout=30,
             )
             response.raise_for_status()
             data = response.json()
-            answer = data["content"][0]["text"]
+            answer = data["choices"][0]["message"]["content"]
 
-            # Ajouter la réponse à l'historique
             with self._lock:
                 self._history.append({"role": "assistant", "content": answer})
 
             return answer
 
         except requests.exceptions.ConnectionError:
-            return "Erreur : pas de connexion internet. Active le Wi-Fi et réessaie."
+            return "Erreur : pas de connexion internet. Active le Wi-Fi."
         except requests.exceptions.Timeout:
-            return "Erreur : Claude ne répond pas (timeout 30s). Réessaie."
+            return "Erreur : pas de réponse (timeout 30s). Réessaie."
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response else "?"
             if status == 401:
-                return "Erreur : clé API invalide. Vérifie avec : tag claude_api_key"
+                return "Erreur : clé API invalide. Vérifie avec : tag groq_api_key"
             elif status == 429:
                 return "Erreur : trop de requêtes. Attends quelques secondes."
             return f"Erreur HTTP {status} : {e}"
         except Exception as e:
-            log_err(f"Claude API error : {e}")
+            log_err(f"Groq API error : {e}")
             return f"Erreur inattendue : {e}"
 
     def clear_history(self):
         with self._lock:
             self._history = []
-        log("Historique Claude effacé")
+        log("Historique effacé")
 
     def show_history(self):
         with self._lock:
@@ -512,8 +507,10 @@ class ClaudeAssistant:
                 return "Aucun historique de conversation."
             lines = []
             for msg in self._history:
-                role = "Toi" if msg["role"] == "user" else "Claude"
-                lines.append(f"[{role}] {msg['content'][:100]}{'…' if len(msg['content']) > 100 else ''}")
+                role = "Toi" if msg["role"] == "user" else "Diablo"
+                texte = msg["content"]
+                apercu = texte[:100] + ("…" if len(texte) > 100 else "")
+                lines.append(f"[{role}] {apercu}")
             return "\n".join(lines)
 
 
@@ -542,11 +539,11 @@ def print_help():
 ║  localisation           Position GPS         ║
 ║  batterie               État batterie        ║
 ╠══════════════════════════════════════════════╣
-║  ASSISTANT IA (Claude)                       ║
+║  ASSISTANT IA (Groq — 100% Gratuit)          ║
 ║  ask <question>         Poser une question   ║
-║  claude reset           Effacer conversation ║
-║  claude historique      Voir l'historique    ║
-║  tag claude_api_key CLE Configurer la clé    ║
+║  ia reset               Effacer conversation ║
+║  ia historique          Voir l'historique    ║
+║  tag groq_api_key CLE   Configurer la clé    ║
 ╠══════════════════════════════════════════════╣
 ║  MÉMOIRE & APPRENTISSAGE                     ║
 ║  stats                  Statistiques         ║
@@ -571,11 +568,11 @@ def print_help():
 class DiabloOS:
     def __init__(self):
         log_dbg("Initialisation DiabloOS…")
-        self.api     = TermuxAPI()
-        self.memory  = NeuralMemory()
-        self.brain   = ExecutiveBrain(self.api, self.memory)
-        self.maint   = MaintenanceBrain()
-        self.claude  = ClaudeAssistant(self.memory)  # ← Nouvel assistant IA
+        self.api    = TermuxAPI()
+        self.memory = NeuralMemory()
+        self.brain  = ExecutiveBrain(self.api, self.memory)
+        self.maint  = MaintenanceBrain()
+        self.ia     = GroqAssistant(self.memory)
         self._setup_signals()
 
     def _setup_signals(self):
@@ -606,4 +603,20 @@ class DiabloOS:
         self.memory.increment_session()
 
         threading.Thread(
-     
+            target=self.brain.run, daemon=True, name="Brain"
+        ).start()
+        threading.Thread(
+            target=self.maint.run, daemon=True, name="Maint"
+        ).start()
+
+        self._shell()
+
+    def _shell(self):
+        while True:
+            try:
+                raw = input("diablo >>> ").strip()
+            except EOFError:
+                break
+            except KeyboardInterrupt:
+                break
+            if 
