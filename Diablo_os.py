@@ -9,8 +9,8 @@ import hashlib
 import signal
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
+# Import optionnel de requests
 try:
     import requests
     REQUESTS_AVAILABLE = True
@@ -20,21 +20,27 @@ except ImportError:
 # =========================
 # CONFIG
 # =========================
-VERSION = "5.0.0"
-BASE_DIR = Path(__file__).parent
+VERSION = "5.2.0"
+BASE_DIR = Path.home()
 MEMORY_FILE = BASE_DIR / "diablo_memory.json"
 BACKUP_FILE = BASE_DIR / "diablo_memory.bak.json"
 LOG_FILE = BASE_DIR / "diablo.log"
 UPDATE_URL = "https://raw.githubusercontent.com/diallo65377-lgtm/Diablo/main/Diablo_os.py"
-UPDATE_INTERVAL = 3600          # vérif update toutes les heures (au lieu de 30min)
-BRAIN_INTERVAL = 30             # cerveau tourne toutes les 30s (au lieu de 60s)
-DEBOUNCE_DELAY = 300            # 5 min entre deux exécutions auto d'une même action
-MIN_PATTERN_COUNT = 3           # seuil pour déclencher une prédiction
+UPDATE_INTERVAL = 3600
+BRAIN_INTERVAL = 30
+DEBOUNCE_DELAY = 300
+MIN_PATTERN_COUNT = 3
 LOW_BATTERY_THRESHOLD = 15
 CRITICAL_BATTERY_THRESHOLD = 5
 
+# Modèle Claude utilisé
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
+CLAUDE_MAX_TOKENS = 512
+CLAUDE_HISTORY_MAX = 10  # Nombre max de messages gardés en mémoire de conversation
+
 # =========================
-# LOGGING STRUCTURÉ
+# LOGGING — ne plante jamais
 # =========================
 def setup_logging():
     fmt = logging.Formatter(
@@ -44,51 +50,45 @@ def setup_logging():
     logger = logging.getLogger("diablo")
     logger.setLevel(logging.DEBUG)
 
-    # Console
-    ch = logging.StreamHandler()
+    # Console toujours active
+    ch = logging.StreamHandler(sys.stdout)
     ch.setFormatter(fmt)
     logger.addHandler(ch)
 
-    # Fichier (rotation manuelle simple : max 500 Ko)
+    # Fichier log — optionnel, jamais bloquant
     try:
         if LOG_FILE.exists() and LOG_FILE.stat().st_size > 500_000:
             LOG_FILE.rename(LOG_FILE.with_suffix(".bak.log"))
-        fh = logging.FileHandler(LOG_FILE)
+        fh = logging.FileHandler(str(LOG_FILE), encoding="utf-8")
         fh.setFormatter(fmt)
         logger.addHandler(fh)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] Log fichier désactivé : {e}", flush=True)
 
     return logger
 
 logger = setup_logging()
-log = logger.info
+log     = logger.info
 log_warn = logger.warning
-log_err = logger.error
-log_dbg = logger.debug
+log_err  = logger.error
+log_dbg  = logger.debug
 
 # =========================
-# MÉMOIRE ROBUSTE
+# MÉMOIRE
 # =========================
 class NeuralMemory:
-    """
-    Mémoire persistante avec sauvegarde atomique et backup.
-    Nouvelle structure v5 : ajout session_count, version, tags libres.
-    """
-
     SCHEMA_VERSION = 2
 
     def __init__(self):
         self._lock = threading.Lock()
         self.data = self._load()
 
-    # --- Schéma par défaut ---
-    def _default(self) -> dict:
+    def _default(self):
         return {
             "_schema": self.SCHEMA_VERSION,
-            "patterns": {},          # {hour: {action: count}}
-            "aliases": {},           # {alias: action}
-            "tags": {},              # {key: value} — données libres
+            "patterns": {},
+            "aliases": {},
+            "tags": {},
             "stats": {
                 "actions": 0,
                 "sessions": 0,
@@ -97,44 +97,38 @@ class NeuralMemory:
             },
         }
 
-    # --- Validation + migration ---
-    def _validate(self, data: dict) -> bool:
-        if not isinstance(data, dict):
-            return False
-        return all(k in data for k in ("patterns", "stats"))
+    def _validate(self, data):
+        return isinstance(data, dict) and "patterns" in data and "stats" in data
 
-    def _migrate(self, data: dict) -> dict:
-        """Migre les anciennes structures vers la v5."""
+    def _migrate(self, data):
         if "_schema" not in data:
             data.setdefault("aliases", {})
             data.setdefault("tags", {})
-            data.setdefault("_schema", self.SCHEMA_VERSION)
+            data["_schema"] = self.SCHEMA_VERSION
             data["stats"].setdefault("sessions", 0)
             data["stats"].setdefault("created_at", datetime.now().isoformat())
             data["stats"].setdefault("last_seen", None)
             log("Mémoire migrée vers schema v2")
         return data
 
-    # --- Chargement ---
-    def _load_file(self, path: Path) -> Optional[dict]:
+    def _load_file(self, path):
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return None
 
-    def _load(self) -> dict:
+    def _load(self):
         for label, path in [("principale", MEMORY_FILE), ("backup", BACKUP_FILE)]:
             data = self._load_file(path)
             if self._validate(data):
                 log(f"Mémoire chargée ({label})")
                 return self._migrate(data)
             if data is not None:
-                log_warn(f"Mémoire {label} corrompue, ignorée")
-        log("Reset mémoire")
+                log_warn(f"Mémoire {label} corrompue")
+        log("Nouvelle mémoire créée")
         return self._default()
 
-    # --- Sauvegarde atomique ---
-    def _atomic_save(self, data: dict):
+    def _atomic_save(self, data):
         tmp = MEMORY_FILE.with_suffix(".tmp")
         try:
             tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -144,7 +138,7 @@ class NeuralMemory:
         except Exception as e:
             log_err(f"Sauvegarde échouée : {e}")
             try:
-                tmp.unlink(missing_ok=True)
+                tmp.unlink()
             except Exception:
                 pass
 
@@ -153,8 +147,7 @@ class NeuralMemory:
             self.data["stats"]["last_seen"] = datetime.now().isoformat()
             self._atomic_save(self.data)
 
-    # --- API publique ---
-    def learn(self, action: str):
+    def learn(self, action):
         hour = str(datetime.now().hour)
         with self._lock:
             self.data["patterns"].setdefault(hour, {})
@@ -163,30 +156,29 @@ class NeuralMemory:
             self.data["stats"]["actions"] += 1
         self.save()
 
-    def predict(self) -> Optional[str]:
-        patterns = self.data.get("patterns", {})
+    def predict(self):
         hour = str(datetime.now().hour)
-        actions = patterns.get(hour, {})
+        actions = self.data.get("patterns", {}).get(hour, {})
         if not actions:
             return None
         best = max(actions, key=actions.get)
         return best if actions[best] >= MIN_PATTERN_COUNT else None
 
-    def add_alias(self, alias: str, action: str):
+    def add_alias(self, alias, action):
         with self._lock:
             self.data["aliases"][alias.lower()] = action.upper()
         self.save()
-        log(f"Alias ajouté : '{alias}' → {action.upper()}")
+        log(f"Alias : '{alias}' → {action.upper()}")
 
-    def resolve_alias(self, cmd: str) -> Optional[str]:
+    def resolve_alias(self, cmd):
         return self.data.get("aliases", {}).get(cmd.lower())
 
-    def set_tag(self, key: str, value):
+    def set_tag(self, key, value):
         with self._lock:
             self.data["tags"][key] = value
         self.save()
 
-    def get_tag(self, key: str, default=None):
+    def get_tag(self, key, default=None):
         return self.data.get("tags", {}).get(key, default)
 
     def increment_session(self):
@@ -200,133 +192,151 @@ class NeuralMemory:
         self.save()
         log("Patterns réinitialisés")
 
-    def export_json(self) -> str:
+    def export_json(self):
         return json.dumps(self.data, indent=2, ensure_ascii=False)
+
 
 # =========================
 # TERMUX API
 # =========================
-ACTIONS: dict[str, list[str]] = {
-    "TORCH_ON":  ["termux-torch", "on"],
-    "TORCH_OFF": ["termux-torch", "off"],
-    "WIFI_ON":   ["termux-wifi-enable", "true"],
-    "WIFI_OFF":  ["termux-wifi-enable", "false"],
-    "VIBRATE":   ["termux-vibrate", "-d", "500"],
-    "VOL_MAX":   ["termux-volume", "music", "15"],
-    "VOL_MUTE":  ["termux-volume", "music", "0"],
-    "PHOTO":     ["termux-camera-photo", "-c", "0",
-                  f"/sdcard/photo_{int(time.time())}.jpg"],
-    "SCREENSHOT":["termux-screenshot",
-                  f"/sdcard/screen_{int(time.time())}.png"],
-    "CLIPBOARD": ["termux-clipboard-get"],     # lecture presse-papier
-    "LOCATION":  ["termux-location"],          # récupère GPS
-}
-
 class TermuxAPI:
-    def _run(self, cmd: list[str], capture=False) -> Optional[str]:
+
+    def _run(self, cmd, capture=False):
         try:
             if capture:
-                out = subprocess.check_output(cmd, timeout=5, stderr=subprocess.DEVNULL)
-                return out.decode().strip()
+                out = subprocess.check_output(
+                    cmd, timeout=6,
+                    stderr=subprocess.DEVNULL
+                )
+                return out.decode("utf-8", errors="replace").strip()
             else:
-                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
         except FileNotFoundError:
-            log_warn(f"Commande introuvable : {cmd[0]}")
+            log_warn(f"Introuvable : {cmd[0]}  (termux-api installé ?)")
         except subprocess.TimeoutExpired:
             log_warn(f"Timeout : {cmd[0]}")
         except Exception as e:
-            log_err(f"Erreur commande {cmd[0]} : {e}")
+            log_err(f"Erreur {cmd[0]} : {e}")
         return None
 
-    def execute(self, action: str, param: Optional[str] = None):
+    def execute(self, action, param=None):
         action = action.upper()
+
+        CMDS = {
+            "TORCH_ON":  ["termux-torch", "on"],
+            "TORCH_OFF": ["termux-torch", "off"],
+            "WIFI_ON":   ["termux-wifi-enable", "true"],
+            "WIFI_OFF":  ["termux-wifi-enable", "false"],
+            "VIBRATE":   ["termux-vibrate", "-d", "500"],
+            "VOL_MAX":   ["termux-volume", "music", "15"],
+            "VOL_MUTE":  ["termux-volume", "music", "0"],
+        }
 
         if action == "SAY" and param:
             self._run(["termux-tts-speak", param])
             return True
-
+        if action == "NOTIFY" and param:
+            self._run(["termux-notification",
+                       "--title", "Diablo OS",
+                       "--content", param])
+            return True
         if action == "OPEN" and param:
             self._run(["termux-open", param])
             return True
-
-        if action == "NOTIFY" and param:
-            self._run(["termux-notification", "--title", "Diablo OS", "--content", param])
+        if action == "PHOTO":
+            ts = int(time.time())
+            self._run(["termux-camera-photo", "-c", "0",
+                       f"/sdcard/photo_{ts}.jpg"])
+            return True
+        if action == "SCREENSHOT":
+            ts = int(time.time())
+            self._run(["termux-screenshot",
+                       f"/sdcard/screen_{ts}.png"])
             return True
 
-        cmd = ACTIONS.get(action)
+        cmd = CMDS.get(action)
         if cmd:
-            # PHOTO : mettre à jour le timestamp à chaque appel
-            if action == "PHOTO":
-                cmd = ["termux-camera-photo", "-c", "0",
-                       f"/sdcard/photo_{int(time.time())}.jpg"]
-            elif action == "SCREENSHOT":
-                cmd = ["termux-screenshot",
-                       f"/sdcard/screen_{int(time.time())}.png"]
             self._run(cmd)
             return True
 
         log_warn(f"Action inconnue : {action}")
         return False
 
-    def send_sms(self, number: str, message: str):
-        if not number.lstrip("+").isdigit():
-            log_warn("Numéro SMS invalide")
+    def send_sms(self, number, message):
+        clean = number.lstrip("+")
+        if not clean.isdigit():
+            print("Numéro invalide.")
             return
         self._run(["termux-sms-send", "-n", number, message])
-        log(f"SMS envoyé à {number}")
+        log(f"SMS → {number}")
 
-    def battery(self) -> dict:
+    def battery(self):
         raw = self._run(["termux-battery-status"], capture=True)
         if raw:
             try:
                 return json.loads(raw)
-            except json.JSONDecodeError:
+            except Exception:
                 pass
         return {}
 
-    def clipboard(self) -> Optional[str]:
+    def clipboard(self):
         return self._run(["termux-clipboard-get"], capture=True)
 
-    def location(self) -> Optional[dict]:
+    def location(self):
         raw = self._run(["termux-location"], capture=True)
         if raw:
             try:
                 return json.loads(raw)
-            except json.JSONDecodeError:
+            except Exception:
                 pass
         return None
 
-    def contacts(self) -> list:
-        raw = self._run(["termux-contact-list"], capture=True)
-        if raw:
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                pass
-        return []
 
 # =========================
 # CERVEAU EXÉCUTIF
 # =========================
 class ExecutiveBrain:
-    def __init__(self, api: TermuxAPI, memory: NeuralMemory):
+    def __init__(self, api, memory):
         self.api = api
         self.memory = memory
         self._running = True
-        self._last_action: dict[str, float] = {}
-        self._stop_event = threading.Event()
+        self._last = {}
+        self._stop = threading.Event()
 
     def stop(self):
         self._running = False
-        self._stop_event.set()
+        self._stop.set()
 
-    def _debounced(self, action: str) -> bool:
+    def _debounce(self, key):
         now = time.time()
-        last = self._last_action.get(action, 0)
-        if now - last > DEBOUNCE_DELAY:
-            self._last_action[action] = now
+        if now - self._last.get(key, 0) > DEBOUNCE_DELAY:
+            self._last[key] = now
             return True
         return False
+
+    def _tick(self):
+        bat = self.api.battery()
+        level = bat.get("percentage", 100)
+        charging = bat.get("status", "").upper() == "CHARGING"
+
+        if level <= CRITICAL_BATTERY_THRESHOLD and not charging:
+            if self._debounce("_crit"):
+                self.api.execute("WIFI_OFF")
+                self.api.execute("NOTIFY", f"Batterie critique {level}%!")
+                log_warn(f"Batterie critique : {level}%")
+        elif level <= LOW_BATTERY_THRESHOLD and not charging:
+            if self._debounce("_low"):
+                self.api.execute("WIFI_OFF")
+                log_warn(f"Batterie faible : {level}%")
+
+        action = self.memory.predict()
+        if action and self._debounce(action):
+            log(f"Auto-action : {action}")
+            self.api.execute(action)
 
     def run(self):
         log("Cerveau exécutif démarré")
@@ -334,273 +344,266 @@ class ExecutiveBrain:
             try:
                 self._tick()
             except Exception as e:
-                log_err(f"Erreur brain : {e}")
-            self._stop_event.wait(timeout=BRAIN_INTERVAL)
+                log_err(f"Brain error : {e}")
+            self._stop.wait(timeout=BRAIN_INTERVAL)
 
-    def _tick(self):
-        bat = self.api.battery()
-        level = bat.get("percentage", 100)
-        status = bat.get("status", "")
-        charging = status.upper() == "CHARGING"
-
-        # Batterie critique → wifi off + notification
-        if level <= CRITICAL_BATTERY_THRESHOLD and not charging:
-            if self._debounced("_CRITICAL_BAT"):
-                self.api.execute("WIFI_OFF")
-                self.api.execute("NOTIFY", f"Batterie critique : {level}%")
-                log_warn(f"Batterie critique ({level}%) — wifi coupé")
-
-        elif level <= LOW_BATTERY_THRESHOLD and not charging:
-            if self._debounced("_LOW_BAT"):
-                self.api.execute("WIFI_OFF")
-                log_warn(f"Batterie faible ({level}%) — wifi coupé")
-
-        # Prédiction comportementale
-        action = self.memory.predict()
-        if action and self._debounced(action):
-            log(f"Auto-action prédite : {action}")
-            self.api.execute(action)
 
 # =========================
-# MISE À JOUR AUTOMATIQUE
+# MAINTENANCE / UPDATE
 # =========================
 class MaintenanceBrain:
     def __init__(self):
-        self._stop_event = threading.Event()
+        self._stop = threading.Event()
 
     def stop(self):
-        self._stop_event.set()
+        self._stop.set()
 
-    def _sha256(self, text: str) -> str:
+    def _sha256(self, text):
         return hashlib.sha256(text.encode()).hexdigest()
 
     def check_update(self):
         if not REQUESTS_AVAILABLE:
-            log_warn("Module 'requests' absent — mise à jour désactivée")
+            log_warn("'requests' absent — update désactivé")
             return
-
         try:
             r = requests.get(UPDATE_URL, timeout=10)
             r.raise_for_status()
         except Exception as e:
-            log_warn(f"Échec récupération update : {e}")
+            log_warn(f"Update inaccessible : {e}")
             return
 
         new_code = r.text
-
-        # Vérifications de sécurité minimales
         if "class DiabloOS" not in new_code:
-            log_warn("Update rejeté : signature manquante")
+            log_warn("Update rejeté (signature absente)")
             return
 
-        current_code = Path(__file__).read_text(encoding="utf-8")
-        if self._sha256(new_code) == self._sha256(current_code):
-            log_dbg("Déjà à jour")
-            return
-
-        if f'VERSION = "{VERSION}"' in new_code:
-            log_dbg("Même version, pas de mise à jour")
-            return
-
-        log("Nouvelle version détectée — mise à jour…")
-        backup = Path(__file__).with_suffix(".bak.py")
+        script = Path(os.path.abspath(__file__))
         try:
-            Path(__file__).replace(backup)
-            Path(__file__).write_text(new_code, encoding="utf-8")
-            log("Redémarrage après mise à jour…")
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            current = script.read_text(encoding="utf-8")
+        except Exception:
+            return
+
+        if self._sha256(new_code) == self._sha256(current):
+            log("Déjà à jour")
+            return
+        if f'VERSION = "{VERSION}"' in new_code:
+            return
+
+        log("Mise à jour disponible — installation…")
+        backup = script.with_suffix(".bak.py")
+        try:
+            script.replace(backup)
+            script.write_text(new_code, encoding="utf-8")
+            log("Redémarrage…")
+            os.execv(sys.executable, [sys.executable, str(script)])
         except Exception as e:
-            log_err(f"Erreur écriture update : {e}")
-            # Restaurer depuis backup
+            log_err(f"Erreur update : {e}")
             if backup.exists():
-                backup.replace(Path(__file__))
+                backup.replace(script)
 
     def run(self):
         log("Maintenance brain démarré")
-        while not self._stop_event.is_set():
+        while not self._stop.is_set():
             self.check_update()
-            self._stop_event.wait(timeout=UPDATE_INTERVAL)
+            self._stop.wait(timeout=UPDATE_INTERVAL)
+
 
 # =========================
-# SHELL — AIDE INTÉGRÉE
+# ASSISTANT CLAUDE IA
 # =========================
-HELP_TEXT = """
+class ClaudeAssistant:
+    """
+    Gère les conversations avec Claude (Anthropic API).
+    Garde un historique de la conversation en cours.
+    """
+
+    def __init__(self, memory):
+        self.memory = memory
+        # Historique de la conversation : liste de {"role": ..., "content": ...}
+        self._history = []
+        self._lock = threading.Lock()
+
+    def _get_api_key(self):
+        key = self.memory.get_tag("claude_api_key")
+        return key
+
+    def ask(self, question):
+        """
+        Envoie une question à Claude et retourne la réponse.
+        Garde l'historique de la conversation.
+        """
+        if not REQUESTS_AVAILABLE:
+            return "Erreur : le module 'requests' est absent.\nInstalle-le avec : pip install requests"
+
+        api_key = self._get_api_key()
+        if not api_key:
+            return (
+                "Clé API Claude manquante !\n"
+                "Configure-la avec la commande :\n"
+                "  tag claude_api_key TA_CLE_ICI\n\n"
+                "Obtiens ta clé gratuite sur : https://console.anthropic.com"
+            )
+
+        # Ajouter la question à l'historique
+        with self._lock:
+            self._history.append({"role": "user", "content": question})
+            # Limiter la taille de l'historique
+            if len(self._history) > CLAUDE_HISTORY_MAX * 2:
+                self._history = self._history[-(CLAUDE_HISTORY_MAX * 2):]
+            messages = list(self._history)
+
+        print("⏳ Claude réfléchit…", flush=True)
+
+        try:
+            response = requests.post(
+                CLAUDE_API_URL,
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": CLAUDE_MODEL,
+                    "max_tokens": CLAUDE_MAX_TOKENS,
+                    "system": (
+                        "Tu es Diablo, un assistant IA intégré dans Diablo OS, "
+                        "un système qui tourne sur Android via Termux. "
+                        "Tu es utile, concis et parles français. "
+                        "Tu peux aider l'utilisateur avec des questions générales, "
+                        "de la programmation, ou l'utilisation de son téléphone."
+                    ),
+                    "messages": messages,
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            answer = data["content"][0]["text"]
+
+            # Ajouter la réponse à l'historique
+            with self._lock:
+                self._history.append({"role": "assistant", "content": answer})
+
+            return answer
+
+        except requests.exceptions.ConnectionError:
+            return "Erreur : pas de connexion internet. Active le Wi-Fi et réessaie."
+        except requests.exceptions.Timeout:
+            return "Erreur : Claude ne répond pas (timeout 30s). Réessaie."
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response else "?"
+            if status == 401:
+                return "Erreur : clé API invalide. Vérifie avec : tag claude_api_key"
+            elif status == 429:
+                return "Erreur : trop de requêtes. Attends quelques secondes."
+            return f"Erreur HTTP {status} : {e}"
+        except Exception as e:
+            log_err(f"Claude API error : {e}")
+            return f"Erreur inattendue : {e}"
+
+    def clear_history(self):
+        with self._lock:
+            self._history = []
+        log("Historique Claude effacé")
+
+    def show_history(self):
+        with self._lock:
+            if not self._history:
+                return "Aucun historique de conversation."
+            lines = []
+            for msg in self._history:
+                role = "Toi" if msg["role"] == "user" else "Claude"
+                lines.append(f"[{role}] {msg['content'][:100]}{'…' if len(msg['content']) > 100 else ''}")
+            return "\n".join(lines)
+
+
+# =========================
+# TEXTE D'AIDE
+# =========================
+def print_help():
+    print(f"""
 ╔══════════════════════════════════════════════╗
-║           DIABLO OS v{ver} — AIDE              ║
+║       DIABLO OS v{VERSION} — COMMANDES        ║
 ╠══════════════════════════════════════════════╣
-║  CONTRÔLE                                    ║
-║  lampe on/off     Torche                     ║
-║  wifi on/off      Wi-Fi                      ║
-║  son max          Volume max                 ║
-║  silence          Volume 0                   ║
-║  vibre            Vibration                  ║
-║  photo            Photo caméra front         ║
-║  screenshot       Capture d'écran            ║
-║                                              ║
+║  CONTRÔLE APPAREIL                           ║
+║  lampe on / lampe off   Torche               ║
+║  wifi on / wifi off     Wi-Fi                ║
+║  son max / silence      Volume               ║
+║  vibre                  Vibration            ║
+║  photo                  Photo caméra front   ║
+║  screenshot             Capture d'écran      ║
+╠══════════════════════════════════════════════╣
 ║  COMMUNICATION                               ║
-║  dit <texte>      Synthèse vocale            ║
-║  sms <num> <msg>  Envoyer SMS                ║
-║  notif <msg>      Notification système       ║
-║  ouvre <url/app>  Ouvrir une ressource       ║
-║  presse-papier    Lire le presse-papier      ║
-║  localisation     Position GPS               ║
-║                                              ║
-║  MÉMOIRE                                     ║
-║  stats            Statistiques               ║
-║  patterns         Afficher les patterns      ║
-║  alias <a> <act>  Créer un alias             ║
-║  tag <k> <v>      Stocker une valeur         ║
-║  tag <k>          Lire une valeur            ║
-║  reset patterns   Effacer les patterns       ║
-║  export           Exporter la mémoire (JSON) ║
-║                                              ║
+║  dit <texte>            Synthèse vocale      ║
+║  sms <num> <msg>        Envoyer un SMS       ║
+║  notif <msg>            Notification         ║
+║  ouvre <url/app>        Ouvrir ressource     ║
+║  presse-papier          Lire le clipboard    ║
+║  localisation           Position GPS         ║
+║  batterie               État batterie        ║
+╠══════════════════════════════════════════════╣
+║  ASSISTANT IA (Claude)                       ║
+║  ask <question>         Poser une question   ║
+║  claude reset           Effacer conversation ║
+║  claude historique      Voir l'historique    ║
+║  tag claude_api_key CLE Configurer la clé    ║
+╠══════════════════════════════════════════════╣
+║  MÉMOIRE & APPRENTISSAGE                     ║
+║  stats                  Statistiques         ║
+║  patterns               Patterns appris      ║
+║  alias <nom> <ACTION>   Créer un raccourci   ║
+║  tag <clé> [valeur]     Stocker/lire valeur  ║
+║  reset patterns         Effacer patterns     ║
+║  export                 Export JSON mémoire  ║
+╠══════════════════════════════════════════════╣
 ║  SYSTÈME                                     ║
-║  batterie         État batterie              ║
-║  update           Vérifier mise à jour       ║
-║  version          Afficher la version        ║
-║  aide / help      Cette aide                 ║
-║  exit / quit      Quitter                    ║
+║  version                Version actuelle     ║
+║  update                 Vérifier MAJ         ║
+║  aide / help / ?        Cette aide           ║
+║  exit / quit            Quitter              ║
 ╚══════════════════════════════════════════════╝
-""".format(ver=VERSION)
+""")
+
 
 # =========================
 # OS PRINCIPAL
 # =========================
 class DiabloOS:
     def __init__(self):
-        self.api = TermuxAPI()
-        self.memory = NeuralMemory()
-        self.brain = ExecutiveBrain(self.api, self.memory)
-        self.maint = MaintenanceBrain()
+        log_dbg("Initialisation DiabloOS…")
+        self.api     = TermuxAPI()
+        self.memory  = NeuralMemory()
+        self.brain   = ExecutiveBrain(self.api, self.memory)
+        self.maint   = MaintenanceBrain()
+        self.claude  = ClaudeAssistant(self.memory)  # ← Nouvel assistant IA
         self._setup_signals()
 
     def _setup_signals(self):
-        """Arrêt propre sur SIGINT / SIGTERM."""
-        def handler(sig, frame):
-            print("\n[Arrêt propre…]")
+        def _quit(sig, frame):
+            print("\n[Arrêt…]", flush=True)
             self.brain.stop()
             self.maint.stop()
             self.memory.save()
             sys.exit(0)
-        signal.signal(signal.SIGINT, handler)
-        signal.signal(signal.SIGTERM, handler)
+        signal.signal(signal.SIGINT,  _quit)
+        signal.signal(signal.SIGTERM, _quit)
 
     def start(self):
-        os.system("clear")
-        print(f"""
+        try:
+            os.system("clear")
+        except Exception:
+            pass
+
+        print(r"""
   ██████╗ ██╗ █████╗ ██████╗ ██╗      ██████╗
   ██╔══██╗██║██╔══██╗██╔══██╗██║     ██╔═══██╗
   ██║  ██║██║███████║██████╔╝██║     ██║   ██║
   ██║  ██║██║██╔══██║██╔══██╗██║     ██║   ██║
   ██████╔╝██║██║  ██║██████╔╝███████╗╚██████╔╝
-  ╚═════╝ ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝ ╚═════╝
-             OS v{VERSION}  — Tapez 'aide' pour l'aide
-""")
+  ╚═════╝ ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝ ╚═════╝""", flush=True)
+        print(f"              OS v{VERSION}  —  tapez 'aide'\n", flush=True)
 
         self.memory.increment_session()
 
-        threading.Thread(target=self.brain.run, daemon=True, name="Brain").start()
-        threading.Thread(target=self.maint.run, daemon=True, name="Maint").start()
-
-        self.shell()
-
-    # ------------------------------------------------------------------
-    # SHELL
-    # ------------------------------------------------------------------
-    def shell(self):
-        while True:
-            try:
-                raw = input("diablo >>> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                break
-
-            if not raw:
-                continue
-
-            cmd = raw.lower()
-            self._dispatch(cmd, raw)
-
-    def _dispatch(self, cmd: str, raw: str):
-        # --- Alias utilisateur ---
-        resolved = self.memory.resolve_alias(cmd)
-        if resolved:
-            log(f"Alias '{cmd}' → {resolved}")
-            self.api.execute(resolved)
-            self.memory.learn(resolved)
-            return
-
-        # --- Commandes intégrées ---
-        action: Optional[str] = None
-
-        # Torche
-        if cmd == "lampe on":
-            action = "TORCH_ON"
-        elif cmd == "lampe off":
-            action = "TORCH_OFF"
-
-        # Wi-Fi
-        elif cmd == "wifi on":
-            action = "WIFI_ON"
-        elif cmd == "wifi off":
-            action = "WIFI_OFF"
-
-        # Audio
-        elif cmd == "son max":
-            action = "VOL_MAX"
-        elif cmd == "silence":
-            action = "VOL_MUTE"
-
-        # Divers
-        elif cmd == "vibre":
-            action = "VIBRATE"
-        elif cmd == "photo":
-            action = "PHOTO"
-        elif cmd == "screenshot":
-            action = "SCREENSHOT"
-
-        # TTS
-        elif cmd.startswith("dit "):
-            text = raw[4:].strip()
-            if text:
-                self.api.execute("SAY", text)
-            else:
-                print("Usage : dit <texte>")
-
-        # Notification
-        elif cmd.startswith("notif "):
-            msg = raw[6:].strip()
-            self.api.execute("NOTIFY", msg)
-
-        # Ouvrir ressource
-        elif cmd.startswith("ouvre "):
-            target = raw[6:].strip()
-            self.api.execute("OPEN", target)
-
-        # SMS
-        elif cmd.startswith("sms "):
-            parts = raw.split(maxsplit=2)
-            if len(parts) == 3:
-                _, number, message = parts
-                self.api.send_sms(number, message)
-            else:
-                print("Usage : sms <numéro> <message>")
-
-        # Presse-papier
-        elif cmd == "presse-papier":
-            content = self.api.clipboard()
-            print(f"Presse-papier : {content or '(vide)'}")
-
-        # GPS
-        elif cmd == "localisation":
-            loc = self.api.location()
-            if loc:
-                lat = loc.get("latitude", "?")
-                lon = loc.get("longitude", "?")
-                print(f"Position : {lat}, {lon}")
-            else:
-                print("Position indisponible")
-
-        # Batterie
-        elif cmd == "batterie":
-            bat = self.api.battery()
-      
+        threading.Thread(
+     
