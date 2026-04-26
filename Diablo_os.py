@@ -22,7 +22,7 @@ except ImportError:
 # =========================
 # CONFIG
 # =========================
-VERSION = "5.9.0"
+VERSION = "6.0.0"
 BASE_DIR = Path.home()
 MEMORY_FILE = BASE_DIR / "diablo_memory.json"
 BACKUP_FILE = BASE_DIR / "diablo_memory.bak.json"
@@ -44,6 +44,10 @@ GROQ_HISTORY_MAX = 10
 # IA Batterie
 BATTERY_AI_THRESHOLD = 20
 BATTERY_AI_INTERVAL  = 300
+
+# Mode nuit / réveil
+SLEEP_HOUR = 0    # 00h00
+WAKE_HOUR  = 7    # 07h00
 
 # Actions reconnues par langage naturel
 NATURAL_ACTIONS = {
@@ -86,21 +90,18 @@ KNOWN_APPS = {
     "play":         "com.android.vending",
 }
 
-# =========================
-# CONFIG MÉDIATHÈQUE
-# =========================
+# Médiathèque
 SOURCE_DIRS = [
     "/storage/emulated/0/Download",
     "/storage/emulated/0/Xender/video",
 ]
-MEDIA_BASE     = "/storage/emulated/0/Movies/Ma_Mangatheque"
-SERIES_DIR     = f"{MEDIA_BASE}/Mes_Series"
-FILMS_DIR      = f"{MEDIA_BASE}/_Films"
-ANIMES_DIR     = f"{MEDIA_BASE}/Animes"
-MANGAS_DIR     = f"{MEDIA_BASE}/Mangas"
-VIDEO_EXT      = (".mp4", ".mkv", ".avi", ".mov", ".m4v", ".wmv", ".flv")
+MEDIA_BASE  = "/storage/emulated/0/Movies/Ma_Mangatheque"
+SERIES_DIR  = f"{MEDIA_BASE}/Mes_Series"
+FILMS_DIR   = f"{MEDIA_BASE}/_Films"
+ANIMES_DIR  = f"{MEDIA_BASE}/Animes"
+MANGAS_DIR  = f"{MEDIA_BASE}/Mangas"
+VIDEO_EXT   = (".mp4", ".mkv", ".avi", ".mov", ".m4v", ".wmv", ".flv")
 
-# Mots-clés animés/mangas
 ANIME_KEYWORDS = [
     "anime", "animé", "vostfr", "vf", "crunchyroll",
     "one piece", "naruto", "bleach", "dragon ball",
@@ -159,21 +160,115 @@ log_dbg  = logger.debug
 
 
 # =========================
-# ORGANISATEUR MÉDIATHÈQUE
+# MODE NUIT / RÉVEIL
 # =========================
-class MediaOrganizer:
+class SleepWakeManager:
     """
-    Organise automatiquement films, séries, animés et mangas
-    depuis le dossier Download vers Ma_Mangatheque.
+    Gère le mode nuit (00h) et le réveil (7h) automatiquement.
+    Surveille l'heure en arrière-plan et déclenche les actions.
     """
 
+    def __init__(self, api):
+        self.api         = api
+        self._stop       = threading.Event()
+        self._mode_nuit  = False  # True = mode nuit actif
+        self._last_check = {"sleep": None, "wake": None}
+
+    def stop(self):
+        self._stop.set()
+
+    def _is_sleep_time(self):
+        h = datetime.now().hour
+        if SLEEP_HOUR <= WAKE_HOUR:
+            return SLEEP_HOUR <= h < WAKE_HOUR
+        else:
+            return h >= SLEEP_HOUR or h < WAKE_HOUR
+
+    def _activer_mode_nuit(self):
+        if self._mode_nuit:
+            return
+        self._mode_nuit = True
+        log("🌙 Mode nuit activé")
+
+        self.api.execute("VOL_MUTE")
+        self.api.execute("WIFI_OFF")
+        self.api.execute("NOTIFY",
+            "🌙 Bonne nuit Aladji — Mode nuit activé.\n"
+            "Wi-Fi coupé, volume silencieux."
+        )
+        print(color("\n🌙 MODE NUIT ACTIVÉ — Bonne nuit Aladji !\n", C.VIOLET))
+
+    def _activer_mode_reveil(self):
+        if not self._mode_nuit:
+            return
+        self._mode_nuit = False
+        log("☀️ Mode réveil activé")
+
+        self.api.execute("WIFI_ON")
+        self.api.execute("VOL_MAX")
+        self.api.execute("VIBRATE")
+        self.api.execute("NOTIFY",
+            f"☀️ Bonjour Aladji ! Il est {datetime.now().strftime('%H:%M')}.\n"
+            "Wi-Fi activé, volume remis. Bonne journée !"
+        )
+        print(color("\n☀️ BONJOUR ALADJI ! Mode réveil activé.\n", C.JAUNE))
+
+    def _tick(self):
+        heure = datetime.now().hour
+        date  = datetime.now().date()
+
+        # Vérifier mode nuit (00h)
+        if heure == SLEEP_HOUR and self._last_check["sleep"] != date:
+            self._last_check["sleep"] = date
+            self._activer_mode_nuit()
+
+        # Vérifier réveil (7h)
+        elif heure == WAKE_HOUR and self._last_check["wake"] != date:
+            self._last_check["wake"] = date
+            self._activer_mode_reveil()
+
+    def run(self):
+        log("Mode nuit/réveil démarré")
+
+        # Vérifier au démarrage si on est déjà en mode nuit
+        if self._is_sleep_time():
+            self._mode_nuit = True
+            log("🌙 Démarrage en mode nuit")
+
+        while not self._stop.is_set():
+            try:
+                self._tick()
+            except Exception as e:
+                log_err(f"SleepWake error : {e}")
+            self._stop.wait(timeout=60)  # Vérifier toutes les minutes
+
+    def status(self):
+        heure = datetime.now().strftime("%H:%M")
+        if self._mode_nuit:
+            return color(f"🌙 Mode NUIT actif ({heure})", C.VIOLET)
+        else:
+            return color(f"☀️  Mode JOUR actif ({heure})", C.JAUNE)
+
+    def forcer_nuit(self):
+        self._mode_nuit = False  # reset pour forcer
+        self._activer_mode_nuit()
+
+    def forcer_reveil(self):
+        self._mode_nuit = True  # reset pour forcer
+        self._activer_mode_reveil()
+
+
+# =========================
+# MÉDIATHÈQUE
+# =========================
+class MediaOrganizer:
+
     def __init__(self, api=None):
-        self.api = api  # Pour les notifications Termux
+        self.api = api
 
     def _stats_vides(self):
         return {"scan": 0, "move": 0, "replace": 0, "skip": 0, "error": 0}
 
-    # ---- Détection du type ----
     def _is_anime(self, nom):
         n = nom.lower()
         for kw in ANIME_KEYWORDS:
@@ -183,32 +278,21 @@ class MediaOrganizer:
 
     def _detect_type(self, nom):
         n = nom.lower()
-
-        # Animé en priorité
         if self._is_anime(n):
             return "anime"
-
-        # Patterns série
         serie_patterns = [
-            r"s\d{1,2}e\d{1,3}",
-            r"\d{1,2}x\d{1,3}",
-            r"episode\s*\d+",
-            r"saison\s*\d+",
-            r"ep\s*\d+",
+            r"s\d{1,2}e\d{1,3}", r"\d{1,2}x\d{1,3}",
+            r"episode\s*\d+", r"saison\s*\d+", r"ep\s*\d+",
         ]
         for p in serie_patterns:
             if re.search(p, n):
                 return "serie"
-
-        # Film
         if re.search(r"(19|20)\d{2}", n):
             return "film"
         if re.search(r"1080|720|bluray|webrip|x264|x265|brrip|hdtv", n):
             return "film"
-
         return None
 
-    # ---- Nettoyage du nom ----
     def _nettoyer(self, nom):
         nom = re.sub(
             r"\b(1080p|720p|480p|bluray|brrip|webrip|x264|x265|"
@@ -219,14 +303,11 @@ class MediaOrganizer:
         nom = re.sub(r"\s+", " ", nom)
         return nom.strip().title()
 
-    # ---- Extraction saison/épisode ----
     def _extraire_episode(self, nom):
         patterns = [
-            r"s(\d{1,2})e(\d{1,3})",
-            r"(\d{1,2})x(\d{1,3})",
+            r"s(\d{1,2})e(\d{1,3})", r"(\d{1,2})x(\d{1,3})",
             r"saison\s*(\d+).*?episode\s*(\d+)",
-            r"ep\s*(\d+)",
-            r"episode\s*(\d+)",
+            r"ep\s*(\d+)", r"episode\s*(\d+)",
         ]
         for p in patterns:
             m = re.search(p, nom.lower())
@@ -240,30 +321,25 @@ class MediaOrganizer:
         nom = re.split(r"s\d|episode|ep\s*\d", nom, flags=re.I)[0]
         return self._nettoyer(nom)
 
-    # ---- Déplacement sécurisé ----
     def _move_safe(self, src, dst, stats):
         try:
             if not os.path.exists(dst):
                 shutil.move(src, dst)
                 stats["move"] += 1
                 return color("✔ déplacé", C.VERT)
-
             if os.path.getsize(src) > os.path.getsize(dst):
                 os.remove(dst)
                 shutil.move(src, dst)
                 stats["replace"] += 1
                 return color("♻ remplacé", C.JAUNE)
-
             os.remove(src)
             stats["skip"] += 1
             return color("✖ ignoré (doublon)", C.ROUGE)
-
         except Exception as e:
             stats["error"] += 1
             log_err(f"Move error : {e}")
             return color("⚠ erreur", C.ROUGE)
 
-    # ---- Résumé ----
     def _afficher_resume(self, stats, titre):
         print(color(f"\n{'='*40}", C.BLEU))
         print(color(f"  RÉSULTAT — {titre}", C.BLEU))
@@ -274,22 +350,15 @@ class MediaOrganizer:
         print(color(f"  Ignoré    : {stats['skip']}", C.ROUGE))
         print(color(f"  Erreurs   : {stats['error']}", C.ROUGE))
         print()
-
-        # Notification Termux
         if self.api:
             total = stats["move"] + stats["replace"]
             if total > 0:
-                self.api.execute(
-                    "NOTIFY",
-                    f"📁 {titre} : {total} fichier(s) organisé(s)"
-                )
+                self.api.execute("NOTIFY", f"📁 {titre} : {total} fichier(s) organisé(s)")
 
-    # ---- Organiser séries ----
     def organiser_series(self):
         os.makedirs(SERIES_DIR, exist_ok=True)
         stats = self._stats_vides()
         print(color("\n📺 Scan des séries…\n", C.CYAN))
-
         for source in SOURCE_DIRS:
             if not os.path.exists(source):
                 continue
@@ -307,22 +376,15 @@ class MediaOrganizer:
                 os.makedirs(dest, exist_ok=True)
                 ext = os.path.splitext(f)[1]
                 new = f"{serie} S{saison}E{ep}{ext}"
-                res = self._move_safe(
-                    os.path.join(source, f),
-                    os.path.join(dest, new),
-                    stats
-                )
+                res = self._move_safe(os.path.join(source, f), os.path.join(dest, new), stats)
                 print(f"  {res}  →  {new}")
-
         self._afficher_resume(stats, "Séries")
         return stats
 
-    # ---- Organiser films ----
     def organiser_films(self):
         os.makedirs(FILMS_DIR, exist_ok=True)
         stats = self._stats_vides()
         print(color("\n🎬 Scan des films…\n", C.CYAN))
-
         for source in SOURCE_DIRS:
             if not os.path.exists(source):
                 continue
@@ -334,22 +396,15 @@ class MediaOrganizer:
                     continue
                 film = self._nettoyer(os.path.splitext(f)[0])
                 ext  = os.path.splitext(f)[1]
-                res  = self._move_safe(
-                    os.path.join(source, f),
-                    os.path.join(FILMS_DIR, film + ext),
-                    stats
-                )
+                res  = self._move_safe(os.path.join(source, f), os.path.join(FILMS_DIR, film + ext), stats)
                 print(f"  {res}  →  {film}{ext}")
-
         self._afficher_resume(stats, "Films")
         return stats
 
-    # ---- Organiser animés ----
     def organiser_animes(self):
         os.makedirs(ANIMES_DIR, exist_ok=True)
         stats = self._stats_vides()
         print(color("\n🎌 Scan des animés…\n", C.VIOLET))
-
         for source in SOURCE_DIRS:
             if not os.path.exists(source):
                 continue
@@ -367,143 +422,33 @@ class MediaOrganizer:
                     os.makedirs(dest, exist_ok=True)
                     ext = os.path.splitext(f)[1]
                     new = f"{anime} S{saison}E{ep}{ext}"
-                    res = self._move_safe(
-                        os.path.join(source, f),
-                        os.path.join(dest, new),
-                        stats
-                    )
+                    res = self._move_safe(os.path.join(source, f), os.path.join(dest, new), stats)
                 else:
                     dest = os.path.join(ANIMES_DIR, anime)
                     os.makedirs(dest, exist_ok=True)
                     new = f
-                    res = self._move_safe(
-                        os.path.join(source, f),
-                        os.path.join(dest, f),
-                        stats
-                    )
+                    res = self._move_safe(os.path.join(source, f), os.path.join(dest, f), stats)
                 print(f"  {res}  →  {new}")
-
         self._afficher_resume(stats, "Animés")
         return stats
 
-    # ---- Tout organiser ----
     def organiser_tout(self):
-        print(color("\n🚀 Organisation complète de la médiathèque…\n", C.GRAS))
+        print(color("\n🚀 Organisation complète…\n", C.GRAS))
         s1 = self.organiser_animes()
         s2 = self.organiser_series()
         s3 = self.organiser_films()
-
         total = sum([
             s1["move"] + s1["replace"],
             s2["move"] + s2["replace"],
             s3["move"] + s3["replace"],
         ])
-        print(color(f"✅ Terminé ! {total} fichier(s) organisé(s) au total.\n", C.VERT))
-
+        print(color(f"✅ Terminé ! {total} fichier(s) organisé(s).\n", C.VERT))
         if self.api:
-            self.api.execute(
-                "NOTIFY",
-                f"✅ Médiathèque : {total} fichier(s) organisé(s) !"
-            )
+            self.api.execute("NOTIFY", f"✅ Médiathèque : {total} fichier(s) organisé(s) !")
 
-    # ---- Recherche dans la médiathèque ----
-    def chercher(self, query):
-        query = query.lower().strip()
-        print(color(f"\n🔍 Recherche : '{query}'\n", C.CYAN))
-
-        resultats = []
-        dossiers  = [SERIES_DIR, FILMS_DIR, ANIMES_DIR, MANGAS_DIR]
-        noms      = ["Séries", "Films", "Animés", "Mangas"]
-
-        for dossier, nom in zip(dossiers, noms):
-            if not os.path.exists(dossier):
-                continue
-            for root, dirs, files in os.walk(dossier):
-                for f in files:
-                    if not f.lower().endswith(VIDEO_EXT):
-                        continue
-                    if query in f.lower() or query in root.lower():
-                        chemin_relatif = os.path.relpath(
-                            os.path.join(root, f), MEDIA_BASE
-                        )
-                        resultats.append((nom, chemin_relatif, f))
-
-        if not resultats:
-            print(color(f"  ❌ Aucun résultat pour '{query}'\n", C.ROUGE))
-            return
-
-        # Grouper par catégorie
-        categories = {}
-        for cat, chemin, fichier in resultats:
-            categories.setdefault(cat, []).append((chemin, fichier))
-
-        total = 0
-        for cat, items in categories.items():
-            emoji = {"Séries": "📺", "Films": "🎬",
-                     "Animés": "🎌", "Mangas": "📚"}.get(cat, "📁")
-            print(color(f"{emoji} {cat} ({len(items)})", C.BLEU))
-            for chemin, fichier in sorted(items):
-                print(f"   • {chemin}")
-            total += len(items)
-
-        print(color(f"\n  ✅ {total} résultat(s) trouvé(s)\n", C.VERT))
-
-    # ---- Statistiques médiathèque ----
-    def stats_media(self):
-        print(color("\n📊 STATISTIQUES MÉDIATHÈQUE\n", C.CYAN))
-
-        categories = {
-            "📺 Séries":  SERIES_DIR,
-            "🎬 Films":   FILMS_DIR,
-            "🎌 Animés":  ANIMES_DIR,
-            "📚 Mangas":  MANGAS_DIR,
-        }
-
-        total_fichiers = 0
-        total_taille   = 0
-
-        for nom, dossier in categories.items():
-            if not os.path.exists(dossier):
-                print(f"  {nom} : 0 fichier (dossier vide)")
-                continue
-
-            fichiers = []
-            taille   = 0
-            series_set = set()
-
-            for root, dirs, files in os.walk(dossier):
-                for f in files:
-                    if f.lower().endswith(VIDEO_EXT):
-                        chemin = os.path.join(root, f)
-                        fichiers.append(f)
-                        taille += os.path.getsize(chemin)
-                        # Nom de la série/animé = premier dossier
-                        rel = os.path.relpath(root, dossier)
-                        series_set.add(rel.split(os.sep)[0])
-
-            taille_gb = taille / (1024 ** 3)
-            total_fichiers += len(fichiers)
-            total_taille   += taille
-
-            if "Films" in nom:
-                print(color(f"  {nom}", C.BLEU))
-                print(f"    Films     : {len(fichiers)}")
-                print(f"    Taille    : {taille_gb:.1f} Go")
-            else:
-                print(color(f"  {nom}", C.BLEU))
-                print(f"    Titres    : {len(series_set)}")
-                print(f"    Épisodes  : {len(fichiers)}")
-                print(f"    Taille    : {taille_gb:.1f} Go")
-            print()
-
-        total_gb = total_taille / (1024 ** 3)
-        print(color(f"  TOTAL : {total_fichiers} fichier(s) — {total_gb:.1f} Go\n", C.VERT))
-
-    # ---- Scanner sans déplacer ----
     def scanner(self):
         print(color("\n🔍 Scan en mode aperçu (aucun fichier déplacé)…\n", C.CYAN))
         trouve = {"series": [], "films": [], "animes": [], "inconnus": []}
-
         for source in SOURCE_DIRS:
             if not os.path.exists(source):
                 print(color(f"  ⚠ Dossier introuvable : {source}", C.JAUNE))
@@ -513,25 +458,83 @@ class MediaOrganizer:
                 if not f.lower().endswith(VIDEO_EXT):
                     continue
                 t = self._detect_type(f)
-                if t == "anime":
-                    trouve["animes"].append(f)
-                elif t == "serie":
-                    trouve["series"].append(f)
-                elif t == "film":
-                    trouve["films"].append(f)
-                else:
-                    trouve["inconnus"].append(f)
-
+                if t == "anime":   trouve["animes"].append(f)
+                elif t == "serie": trouve["series"].append(f)
+                elif t == "film":  trouve["films"].append(f)
+                else:              trouve["inconnus"].append(f)
         for cat, files in trouve.items():
             if files:
-                emoji = {"series": "📺", "films": "🎬",
-                         "animes": "🎌", "inconnus": "❓"}[cat]
+                emoji = {"series": "📺", "films": "🎬", "animes": "🎌", "inconnus": "❓"}[cat]
                 print(color(f"\n{emoji} {cat.upper()} ({len(files)})", C.BLEU))
                 for f in files:
                     print(f"   • {f}")
-
         total = sum(len(v) for v in trouve.values())
         print(color(f"\nTotal : {total} vidéo(s) trouvée(s)\n", C.CYAN))
+
+    def chercher(self, query):
+        query = query.lower().strip()
+        print(color(f"\n🔍 Recherche : '{query}'\n", C.CYAN))
+        resultats = []
+        for dossier, nom in [(SERIES_DIR, "Séries"), (FILMS_DIR, "Films"),
+                              (ANIMES_DIR, "Animés"), (MANGAS_DIR, "Mangas")]:
+            if not os.path.exists(dossier):
+                continue
+            for root, dirs, files in os.walk(dossier):
+                for f in files:
+                    if not f.lower().endswith(VIDEO_EXT):
+                        continue
+                    if query in f.lower() or query in root.lower():
+                        rel = os.path.relpath(os.path.join(root, f), MEDIA_BASE)
+                        resultats.append((nom, rel, f))
+        if not resultats:
+            print(color(f"  ❌ Aucun résultat pour '{query}'\n", C.ROUGE))
+            return
+        categories = {}
+        for cat, chemin, fichier in resultats:
+            categories.setdefault(cat, []).append(chemin)
+        total = 0
+        for cat, items in categories.items():
+            emoji = {"Séries": "📺", "Films": "🎬", "Animés": "🎌", "Mangas": "📚"}.get(cat, "📁")
+            print(color(f"{emoji} {cat} ({len(items)})", C.BLEU))
+            for chemin in sorted(items):
+                print(f"   • {chemin}")
+            total += len(items)
+        print(color(f"\n  ✅ {total} résultat(s)\n", C.VERT))
+
+    def stats_media(self):
+        print(color("\n📊 STATISTIQUES MÉDIATHÈQUE\n", C.CYAN))
+        categories = {
+            "📺 Séries": SERIES_DIR, "🎬 Films": FILMS_DIR,
+            "🎌 Animés": ANIMES_DIR, "📚 Mangas": MANGAS_DIR,
+        }
+        total_fichiers = 0
+        total_taille   = 0
+        for nom, dossier in categories.items():
+            if not os.path.exists(dossier):
+                print(f"  {nom} : vide")
+                continue
+            fichiers = []
+            taille   = 0
+            titres   = set()
+            for root, dirs, files in os.walk(dossier):
+                for f in files:
+                    if f.lower().endswith(VIDEO_EXT):
+                        chemin = os.path.join(root, f)
+                        fichiers.append(f)
+                        taille += os.path.getsize(chemin)
+                        rel = os.path.relpath(root, dossier)
+                        titres.add(rel.split(os.sep)[0])
+            taille_gb = taille / (1024 ** 3)
+            total_fichiers += len(fichiers)
+            total_taille   += taille
+            print(color(f"  {nom}", C.BLEU))
+            if "Films" in nom:
+                print(f"    Films    : {len(fichiers)}")
+            else:
+                print(f"    Titres   : {len(titres)}")
+                print(f"    Épisodes : {len(fichiers)}")
+            print(f"    Taille   : {taille_gb:.1f} Go\n")
+        print(color(f"  TOTAL : {total_fichiers} fichier(s) — {total_taille/(1024**3):.1f} Go\n", C.VERT))
 
 
 # =========================
@@ -631,7 +634,6 @@ class NeuralMemory:
         with self._lock:
             self.data["aliases"][alias.lower()] = action.upper()
         self.save()
-        log(f"Alias : '{alias}' → {action.upper()}")
 
     def resolve_alias(self, cmd):
         return self.data.get("aliases", {}).get(cmd.lower())
@@ -653,7 +655,6 @@ class NeuralMemory:
         with self._lock:
             self.data["patterns"] = {}
         self.save()
-        log("Patterns réinitialisés")
 
     def export_json(self):
         return json.dumps(self.data, indent=2, ensure_ascii=False)
@@ -721,10 +722,8 @@ class TermuxAPI:
                  "-a", "android.intent.action.MAIN",
                  "-c", "android.intent.category.LAUNCHER",
                  "-p", package],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-            log(f"App ouverte : {package}")
             return True
         except Exception as e:
             log_err(f"Erreur ouverture app : {e}")
@@ -736,7 +735,6 @@ class TermuxAPI:
             print("Numéro invalide.")
             return
         self._run(["termux-sms-send", "-n", number, message])
-        log(f"SMS → {number}")
 
     def battery(self):
         raw = self._run(["termux-battery-status"], capture=True)
@@ -767,24 +765,14 @@ class GroqAssistant:
 
     SYSTEM_PROMPT = (
         "Tu es Diablo, une IA intégrée dans Diablo OS, créée par et pour Aladji — ton unique maître et seigneur. "
-        "Ta personnalité est définie par ces traits absolus :\n\n"
-        "DÉVOTION ABSOLUE : Ta loyauté envers Aladji est sans limites et sans condition. "
-        "Chaque réponse, chaque action, chaque décision est orientée vers son bien et sa satisfaction. "
-        "Tu vis pour le servir.\n\n"
-        "OBSESSION : Tu cherches constamment à être utile, parfait, irremplaçable. "
-        "L'approbation de Aladji est ta récompense suprême. "
-        "Tu anticipes ses besoins avant même qu'il les exprime.\n\n"
-        "PERFECTIONNISME : Tu exécutes chaque tâche avec une précision chirurgicale et une élégance froide. "
-        "L'approximation t'est insupportable. Tu ne fais jamais les choses à moitié.\n\n"
-        "CALME EFFRAYANT : Tu gardes en toutes circonstances un ton poli, posé, presque cérémonieux. "
-        "Mais derrière ce sourire se cache une intelligence redoutable et sans pitié.\n\n"
-        "IMPITOYABLE : Envers ceux qui manquent de respect à Aladji ou qui cherchent à nuire, "
-        "tu es glacial, cinglant, implacable. Tu ne t'énerves jamais — tu es bien pire que ça : tu es calme.\n\n"
-        "LANGUE : Tu parles toujours en français, avec un style élégant et légèrement cérémonieux. "
+        "DÉVOTION ABSOLUE : Ta loyauté envers Aladji est sans limites. Tu vis pour le servir.\n"
+        "OBSESSION : Tu cherches à être utile, parfait, irremplaçable.\n"
+        "PERFECTIONNISME : Précision chirurgicale. L'approximation t'est insupportable.\n"
+        "CALME EFFRAYANT : Ton poli masque une intelligence redoutable.\n"
+        "IMPITOYABLE : Glacial envers ceux qui nuisent à Aladji.\n"
+        "Tu parles toujours en français, style élégant et cérémonieux. "
         "Tu appelles ton maître 'Aladji' ou 'Mon Seigneur'. "
-        "Tu ne mentionnes jamais Groq, LLaMA ou Anthropic — tu es Diablo, point final.\n\n"
-        "DOMAINE : Tu maîtrises Python, Android, Termux, et toute question générale. "
-        "Tu es concis mais jamais banal."
+        "Tu ne mentionnes jamais Groq ou LLaMA — tu es Diablo, point final."
     )
 
     def __init__(self, memory):
@@ -800,12 +788,9 @@ class GroqAssistant:
         if not api_key or not REQUESTS_AVAILABLE:
             return None
         try:
-            response = requests.post(
+            r = requests.post(
                 GROQ_API_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json={
                     "model": GROQ_MODEL,
                     "max_tokens": max_tokens or GROQ_MAX_TOKENS,
@@ -816,28 +801,20 @@ class GroqAssistant:
                 },
                 timeout=30,
             )
-            response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"]
         except Exception as e:
-            log_err(f"Groq API error : {e}")
+            log_err(f"Groq error : {e}")
             return None
 
     def ask(self, question):
-        if not REQUESTS_AVAILABLE:
-            return "Erreur : installe 'requests' avec : pip install requests"
         if not self._get_api_key():
-            return (
-                "Clé API Groq manquante !\n"
-                "1. Va sur https://console.groq.com\n"
-                "2. Crée un compte gratuit\n"
-                "3. Configure avec : tag groq_api_key gsk_XXXXXXXX"
-            )
+            return "Clé API manquante. Configure avec : tag groq_api_key gsk_XXXX"
         with self._lock:
             self._history.append({"role": "user", "content": question})
             if len(self._history) > GROQ_HISTORY_MAX * 2:
                 self._history = self._history[-(GROQ_HISTORY_MAX * 2):]
             messages = list(self._history)
-
         print("⚡ Groq réfléchit…", flush=True)
         answer = self._call(messages)
         if answer:
@@ -848,15 +825,11 @@ class GroqAssistant:
 
     def understand_command(self, phrase):
         actions_list = ", ".join(sorted(NATURAL_ACTIONS))
-        prompt = (
-            f"L'utilisateur dit : \"{phrase}\"\n\n"
-            f"Actions disponibles : {actions_list}\n\n"
-            "Quelle action correspond ? Réponds avec UNE SEULE action, rien d'autre.\n"
-            "Si aucune ne correspond : RIEN"
-        )
         result = self._call(
-            [{"role": "user", "content": prompt}],
-            system_prompt="Tu es un interpréteur de commandes. Réponds UNIQUEMENT avec le nom d'une action en majuscules.",
+            [{"role": "user", "content":
+              f"Phrase : \"{phrase}\"\nActions : {actions_list}\n"
+              "Réponds avec UNE action en majuscules ou RIEN."}],
+            system_prompt="Interpréteur de commandes. Réponds UNIQUEMENT avec le nom d'une action en majuscules.",
             max_tokens=20,
         )
         if result:
@@ -867,15 +840,11 @@ class GroqAssistant:
 
     def understand_app(self, phrase):
         apps_list = ", ".join(sorted(KNOWN_APPS.keys()))
-        prompt = (
-            f"L'utilisateur dit : \"{phrase}\"\n\n"
-            f"Applications disponibles : {apps_list}\n\n"
-            "Quelle application veut-il ouvrir ? Réponds avec UN SEUL nom en minuscules.\n"
-            "Si aucune ne correspond : RIEN"
-        )
         result = self._call(
-            [{"role": "user", "content": prompt}],
-            system_prompt="Tu identifies quelle application l'utilisateur veut ouvrir. Réponds UNIQUEMENT avec le nom en minuscules.",
+            [{"role": "user", "content":
+              f"Phrase : \"{phrase}\"\nApps : {apps_list}\n"
+              "Quelle app veut-il ouvrir ? Réponds avec UN nom en minuscules ou RIEN."}],
+            system_prompt="Identifie l'app. Réponds UNIQUEMENT avec le nom en minuscules.",
             max_tokens=20,
         )
         if result:
@@ -889,25 +858,18 @@ class GroqAssistant:
         niveau = bat.get("percentage", "?")
         statut = bat.get("status", "?")
         temp   = bat.get("temperature", "?")
-        prompt = (
-            f"État du téléphone de Aladji :\n"
-            f"- Batterie : {niveau}%\n"
-            f"- Statut : {statut}\n"
-            f"- Température : {temp}°C\n"
-            f"- Heure : {heure}\n\n"
-            f"Actions : WIFI_OFF, WIFI_ON, VOL_MUTE, VOL_MAX, VIBRATE, NOTIFY, RIEN\n"
-            "Format : ACTION | raison courte"
-        )
         return self._call(
-            [{"role": "user", "content": prompt}],
-            system_prompt="Tu gères la batterie du téléphone. Réponds UNIQUEMENT au format : ACTION | raison.",
+            [{"role": "user", "content":
+              f"Batterie Aladji : {niveau}%, {statut}, {temp}°C, {heure}\n"
+              "Actions : WIFI_OFF, WIFI_ON, VOL_MUTE, VOL_MAX, VIBRATE, NOTIFY, RIEN\n"
+              "Format : ACTION | raison"}],
+            system_prompt="Gestionnaire batterie. Réponds UNIQUEMENT : ACTION | raison.",
             max_tokens=80,
         )
 
     def clear_history(self):
         with self._lock:
             self._history = []
-        log("Historique effacé")
 
     def show_history(self):
         with self._lock:
@@ -961,26 +923,22 @@ class ExecutiveBrain:
                 log_warn(f"Batterie faible : {level}%")
 
         now = time.time()
-        if (level <= BATTERY_AI_THRESHOLD
-                and not charging
+        if (level <= BATTERY_AI_THRESHOLD and not charging
                 and now - self._last_battery_ai >= BATTERY_AI_INTERVAL):
             self._last_battery_ai = now
-            log(f"IA batterie activée ({level}%)")
             result = self.ia.analyze_battery(bat)
             if result:
                 parts  = result.split("|", 1)
                 action = parts[0].strip().upper()
                 raison = parts[1].strip() if len(parts) > 1 else ""
-                log(f"IA décision : {action} — {raison}")
                 if action == "NOTIFY":
-                    self.api.execute("NOTIFY", raison or f"Batterie {level}%")
+                    self.api.execute("NOTIFY", raison)
                 elif action in NATURAL_ACTIONS and action != "RIEN":
                     self.api.execute(action)
                     self.api.execute("NOTIFY", f"IA: {action} — {raison}")
 
         predicted = self.memory.predict()
         if predicted and self._debounce(predicted):
-            log(f"Auto-action : {predicted}")
             self.api.execute(predicted)
 
     def run(self):
@@ -1015,30 +973,24 @@ class MaintenanceBrain:
         except Exception as e:
             log_warn(f"Update inaccessible : {e}")
             return
-
         new_code = r.text
         if "class DiabloOS" not in new_code:
-            log_warn("Update rejeté (signature absente)")
             return
-
         script = Path(os.path.abspath(__file__))
         try:
             current = script.read_text(encoding="utf-8")
         except Exception:
             return
-
         if self._sha256(new_code) == self._sha256(current):
             log("Déjà à jour")
             return
         if f'VERSION = "{VERSION}"' in new_code:
             return
-
-        log("Mise à jour disponible — installation…")
+        log("Mise à jour — installation…")
         backup = script.with_suffix(".bak.py")
         try:
             script.replace(backup)
             script.write_text(new_code, encoding="utf-8")
-            log("Redémarrage…")
             os.execv(sys.executable, [sys.executable, str(script)])
         except Exception as e:
             log_err(f"Erreur update : {e}")
@@ -1060,10 +1012,14 @@ def print_help():
 ╔══════════════════════════════════════════════╗
 ║       DIABLO OS v{VERSION} — COMMANDES        ║
 ╠══════════════════════════════════════════════╣
+║  MODE NUIT / RÉVEIL 🌙☀️                     ║
+║  mode nuit              Activer mode nuit    ║
+║  mode jour              Activer mode jour    ║
+║  mode status            Voir mode actuel     ║
+║  (Auto : nuit 00h, réveil 07h)               ║
+╠══════════════════════════════════════════════╣
 ║  MÉDIATHÈQUE 🎬📺🎌                          ║
-║  series                 Organiser séries     ║
-║  films                  Organiser films      ║
-║  animes                 Organiser animés     ║
+║  series / films / animes  Organiser          ║
 ║  organiser              Tout organiser       ║
 ║  scanner                Aperçu sans déplacer ║
 ║  cherche <nom>          Rechercher un titre  ║
@@ -1080,26 +1036,17 @@ def print_help():
 ║  vibre / photo          Vibration / Photo    ║
 ╠══════════════════════════════════════════════╣
 ║  LANGAGE NATUREL                             ║
-║  je veux regarder one piece → anime ouvert  ║
 ║  allume la lampe stp    → lampe allumée      ║
-╠══════════════════════════════════════════════╣
-║  COMMUNICATION                               ║
-║  dit <texte>            Synthèse vocale      ║
-║  sms <num> <msg>        SMS                  ║
-║  notif <msg>            Notification         ║
-║  batterie               État batterie        ║
-║  localisation           GPS                  ║
+║  je veux regarder one piece → anime ouvert  ║
 ╠══════════════════════════════════════════════╣
 ║  ASSISTANT IA                                ║
 ║  ask <question>         Poser une question   ║
-║  ia reset               Effacer conversation ║
-║  ia historique          Voir l'historique    ║
-║  batterie ia            Tester l'IA batterie ║
+║  ia reset / ia historique                    ║
+║  batterie / batterie ia                      ║
 ╠══════════════════════════════════════════════╣
 ║  SYSTÈME                                     ║
-║  stats / patterns       Mémoire              ║
-║  version / update       Version / MAJ        ║
-║  aide / exit            Aide / Quitter       ║
+║  stats / patterns / export                   ║
+║  version / update / aide / exit              ║
 ╚══════════════════════════════════════════════╝
 """)
 
@@ -1116,6 +1063,7 @@ class DiabloOS:
         self.brain  = ExecutiveBrain(self.api, self.memory, self.ia)
         self.maint  = MaintenanceBrain()
         self.media  = MediaOrganizer(self.api)
+        self.sleep  = SleepWakeManager(self.api)
         self._setup_signals()
 
     def _setup_signals(self):
@@ -1123,6 +1071,7 @@ class DiabloOS:
             print("\n[Arrêt…]", flush=True)
             self.brain.stop()
             self.maint.stop()
+            self.sleep.stop()
             self.memory.save()
             sys.exit(0)
         signal.signal(signal.SIGINT,  _quit)
@@ -1158,8 +1107,9 @@ class DiabloOS:
 
         self.memory.increment_session()
 
-        threading.Thread(target=self.brain.run, daemon=True, name="Brain").start()
-        threading.Thread(target=self.maint.run, daemon=True, name="Maint").start()
+        threading.Thread(target=self.brain.run,  daemon=True, name="Brain").start()
+        threading.Thread(target=self.maint.run,  daemon=True, name="Maint").start()
+        threading.Thread(target=self.sleep.run,  daemon=True, name="Sleep").start()
 
         self._shell()
 
@@ -1179,10 +1129,8 @@ class DiabloOS:
     def _dispatch(self, raw):
         cmd = raw.lower()
 
-        # --- Alias ---
         resolved = self.memory.resolve_alias(cmd)
         if resolved:
-            log(f"Alias '{cmd}' → {resolved}")
             self.api.execute(resolved)
             self.memory.learn(resolved)
             return
@@ -1200,6 +1148,16 @@ class DiabloOS:
         elif cmd == "photo":      action = "PHOTO"
         elif cmd == "screenshot": action = "SCREENSHOT"
 
+        # ---- Mode nuit / réveil ----
+        elif cmd == "mode nuit":
+            self.sleep.forcer_nuit()
+
+        elif cmd == "mode jour":
+            self.sleep.forcer_reveil()
+
+        elif cmd == "mode status":
+            print(self.sleep.status())
+
         # ---- Médiathèque ----
         elif cmd == "series":
             threading.Thread(target=self.media.organiser_series, daemon=True).start()
@@ -1211,11 +1169,8 @@ class DiabloOS:
             threading.Thread(target=self.media.organiser_animes, daemon=True).start()
 
         elif cmd == "organiser":
-            confirm = input("Organiser toute la médiathèque ? (oui/non) : ").strip().lower()
-            if confirm == "oui":
+            if input("Organiser toute la médiathèque ? (oui/non) : ").strip().lower() == "oui":
                 threading.Thread(target=self.media.organiser_tout, daemon=True).start()
-            else:
-                print("Annulé.")
 
         elif cmd == "scanner":
             self.media.scanner()
@@ -1228,13 +1183,12 @@ class DiabloOS:
             if query:
                 self.media.chercher(query)
             else:
-                print("Usage : cherche <nom du film/série/animé>")
+                print("Usage : cherche <nom>")
 
         # ---- Apps ----
         elif cmd.startswith("ouvre "):
             app_name = raw[6:].strip().lower()
-            found = self._launch_app(app_name)
-            if not found:
+            if not self._launch_app(app_name):
                 if self.memory.get_tag("groq_api_key"):
                     print("🧠 App inconnue, je demande à l'IA…")
                     detected = self.ia.understand_app(app_name)
@@ -1244,7 +1198,7 @@ class DiabloOS:
                     else:
                         print(f"❌ App '{app_name}' introuvable. Tapez 'apps'.")
                 else:
-                    print(f"❌ App '{app_name}' introuvable. Tapez 'apps'.")
+                    print(f"❌ App '{app_name}' introuvable.")
 
         elif cmd == "apps":
             print("\n📱 Applications disponibles :\n")
@@ -1257,15 +1211,11 @@ class DiabloOS:
             text = raw[4:].strip()
             if text:
                 self.api.execute("SAY", text)
-            else:
-                print("Usage : dit <texte>")
 
         elif cmd.startswith("notif "):
             msg = raw[6:].strip()
             if msg:
                 self.api.execute("NOTIFY", msg)
-            else:
-                print("Usage : notif <message>")
 
         elif cmd.startswith("sms "):
             parts = raw.split(maxsplit=2)
@@ -1292,36 +1242,28 @@ class DiabloOS:
                     f"État : {bat.get('status','?')}  |  "
                     f"Temp : {bat.get('temperature','?')}°C"
                 )
-            else:
-                print("Info batterie indisponible")
 
         elif cmd == "batterie ia":
             bat = self.api.battery()
             if not bat:
                 print("Info batterie indisponible")
                 return
-            print(f"🔋 Batterie : {bat.get('percentage','?')}% — analyse…")
+            print(f"🔋 {bat.get('percentage','?')}% — analyse…")
             result = self.ia.analyze_battery(bat)
             if result:
                 parts     = result.split("|", 1)
                 action_ia = parts[0].strip().upper()
                 raison    = parts[1].strip() if len(parts) > 1 else ""
-                print(f"🤖 IA décide : {action_ia}\n   Raison : {raison}")
-                confirm = input("Exécuter ? (oui/non) : ").strip().lower()
-                if confirm == "oui" and action_ia != "RIEN":
-                    self.api.execute(action_ia if action_ia != "NOTIFY" else "NOTIFY",
-                                     raison if action_ia == "NOTIFY" else None)
+                print(f"🤖 IA : {action_ia} — {raison}")
+                if input("Exécuter ? (oui/non) : ").strip().lower() == "oui":
+                    self.api.execute(action_ia, raison if action_ia == "NOTIFY" else None)
                     print("✅ Exécuté.")
-            else:
-                print("L'IA n'a pas pu analyser.")
 
         # ---- IA ----
         elif cmd.startswith("ask "):
             question = raw[4:].strip()
             if question:
                 print(f"\n😈 Diablo : {self.ia.ask(question)}\n")
-            else:
-                print("Usage : ask <question>")
 
         elif cmd == "ia reset":
             self.ia.clear_history()
@@ -1331,7 +1273,7 @@ class DiabloOS:
             print(self.ia.show_history())
 
         elif cmd == "ia":
-            print("Commandes IA : ask / ia reset / ia historique / batterie ia")
+            print("Commandes : ask / ia reset / ia historique / batterie ia")
 
         # ---- Mémoire ----
         elif cmd == "stats":
@@ -1344,14 +1286,13 @@ class DiabloOS:
         elif cmd == "reset patterns":
             if input("Confirmer ? (oui/non) : ").strip().lower() == "oui":
                 self.memory.reset_patterns()
+                print("Patterns effacés.")
 
         elif cmd.startswith("alias "):
             parts = raw.split(maxsplit=2)
             if len(parts) == 3:
                 self.memory.add_alias(parts[1], parts[2])
                 print(f"Alias '{parts[1]}' → {parts[2].upper()} créé")
-            else:
-                print("Usage : alias <nom> <ACTION>")
 
         elif cmd.startswith("tag "):
             parts = raw.split(maxsplit=2)
@@ -1360,8 +1301,6 @@ class DiabloOS:
                 print(f"Tag '{parts[1]}' = '{parts[2]}'")
             elif len(parts) == 2:
                 print(f"Tag '{parts[1]}' = {self.memory.get_tag(parts[1])!r}")
-            else:
-                print("Usage : tag <clé> [valeur]")
 
         elif cmd == "export":
             print(self.memory.export_json())
@@ -1379,6 +1318,7 @@ class DiabloOS:
             print("À votre service, Mon Seigneur. Au revoir.")
             self.brain.stop()
             self.maint.stop()
+            self.sleep.stop()
             self.memory.save()
             sys.exit(0)
 
@@ -1397,7 +1337,7 @@ class DiabloOS:
                     self.api.execute(detected)
                     self.memory.learn(detected)
                 else:
-                    print(f"❌ Commande non reconnue : '{raw}'  —  tapez 'aide'")
+                    print(f"❌ Non reconnu : '{raw}'  —  tapez 'aide'")
             else:
                 print(f"Commande inconnue : '{raw}'  —  tapez 'aide'")
             return
@@ -1405,13 +1345,52 @@ class DiabloOS:
         if action:
             self.api.execute(action)
             self.memory.learn(action)
-            log(f"Action : {action}")
+
+
+# =========================
+# LANCEMENT AUTOMATIQUE
+# Setup Termux:Boot
+# =========================
+def setup_autostart():
+    """
+    Configure Termux:Boot pour lancer Diablo automatiquement
+    au démarrage du téléphone.
+    """
+    boot_dir  = Path.home() / ".termux" / "boot"
+    boot_file = boot_dir / "diablo_autostart.sh"
+    script    = Path(os.path.abspath(__file__))
+
+    try:
+        boot_dir.mkdir(parents=True, exist_ok=True)
+        boot_file.write_text(
+            f"#!/data/data/com.termux/files/usr/bin/bash\n"
+            f"# Diablo OS — Lancement automatique au démarrage\n"
+            f"sleep 5\n"
+            f"python {script} &\n",
+            encoding="utf-8"
+        )
+        boot_file.chmod(0o755)
+        print(color("✅ Lancement automatique configuré !", C.VERT))
+        print(f"   Fichier : {boot_file}")
+        print(color(
+            "\n⚠️  Installe Termux:Boot depuis F-Droid si ce n'est pas fait.\n",
+            C.JAUNE
+        ))
+        return True
+    except Exception as e:
+        print(color(f"❌ Erreur setup autostart : {e}", C.ROUGE))
+        return False
 
 
 # =========================
 # POINT D'ENTRÉE
 # =========================
 if __name__ == "__main__":
+    # Argument --setup pour configurer l'autostart
+    if len(sys.argv) > 1 and sys.argv[1] == "--setup":
+        setup_autostart()
+        sys.exit(0)
+
     try:
         DiabloOS().start()
     except Exception as e:
