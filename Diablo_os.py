@@ -22,7 +22,7 @@ except ImportError:
 # =========================
 # CONFIG
 # =========================
-VERSION = "5.8.0"
+VERSION = "5.9.0"
 BASE_DIR = Path.home()
 MEMORY_FILE = BASE_DIR / "diablo_memory.json"
 BACKUP_FILE = BASE_DIR / "diablo_memory.bak.json"
@@ -89,7 +89,10 @@ KNOWN_APPS = {
 # =========================
 # CONFIG MÉDIATHÈQUE
 # =========================
-MEDIA_SOURCE   = "/storage/emulated/0/Download"
+SOURCE_DIRS = [
+    "/storage/emulated/0/Download",
+    "/storage/emulated/0/Xender/video",
+]
 MEDIA_BASE     = "/storage/emulated/0/Movies/Ma_Mangatheque"
 SERIES_DIR     = f"{MEDIA_BASE}/Mes_Series"
 FILMS_DIR      = f"{MEDIA_BASE}/_Films"
@@ -287,29 +290,29 @@ class MediaOrganizer:
         stats = self._stats_vides()
         print(color("\n📺 Scan des séries…\n", C.CYAN))
 
-        for f in os.listdir(MEDIA_SOURCE):
-            if not f.lower().endswith(VIDEO_EXT):
+        for source in SOURCE_DIRS:
+            if not os.path.exists(source):
                 continue
-            stats["scan"] += 1
-            if self._detect_type(f) != "serie":
-                continue
-
-            saison, ep = self._extraire_episode(f)
-            if not ep:
-                continue
-
-            serie = self._nom_serie(f)
-            dest  = os.path.join(SERIES_DIR, serie, f"Saison {saison}")
-            os.makedirs(dest, exist_ok=True)
-
-            ext = os.path.splitext(f)[1]
-            new = f"{serie} S{saison}E{ep}{ext}"
-            res = self._move_safe(
-                os.path.join(MEDIA_SOURCE, f),
-                os.path.join(dest, new),
-                stats
-            )
-            print(f"  {res}  →  {new}")
+            for f in os.listdir(source):
+                if not f.lower().endswith(VIDEO_EXT):
+                    continue
+                stats["scan"] += 1
+                if self._detect_type(f) != "serie":
+                    continue
+                saison, ep = self._extraire_episode(f)
+                if not ep:
+                    continue
+                serie = self._nom_serie(f)
+                dest  = os.path.join(SERIES_DIR, serie, f"Saison {saison}")
+                os.makedirs(dest, exist_ok=True)
+                ext = os.path.splitext(f)[1]
+                new = f"{serie} S{saison}E{ep}{ext}"
+                res = self._move_safe(
+                    os.path.join(source, f),
+                    os.path.join(dest, new),
+                    stats
+                )
+                print(f"  {res}  →  {new}")
 
         self._afficher_resume(stats, "Séries")
         return stats
@@ -320,21 +323,23 @@ class MediaOrganizer:
         stats = self._stats_vides()
         print(color("\n🎬 Scan des films…\n", C.CYAN))
 
-        for f in os.listdir(MEDIA_SOURCE):
-            if not f.lower().endswith(VIDEO_EXT):
+        for source in SOURCE_DIRS:
+            if not os.path.exists(source):
                 continue
-            stats["scan"] += 1
-            if self._detect_type(f) != "film":
-                continue
-
-            film = self._nettoyer(os.path.splitext(f)[0])
-            ext  = os.path.splitext(f)[1]
-            res  = self._move_safe(
-                os.path.join(MEDIA_SOURCE, f),
-                os.path.join(FILMS_DIR, film + ext),
-                stats
-            )
-            print(f"  {res}  →  {film}{ext}")
+            for f in os.listdir(source):
+                if not f.lower().endswith(VIDEO_EXT):
+                    continue
+                stats["scan"] += 1
+                if self._detect_type(f) != "film":
+                    continue
+                film = self._nettoyer(os.path.splitext(f)[0])
+                ext  = os.path.splitext(f)[1]
+                res  = self._move_safe(
+                    os.path.join(source, f),
+                    os.path.join(FILMS_DIR, film + ext),
+                    stats
+                )
+                print(f"  {res}  →  {film}{ext}")
 
         self._afficher_resume(stats, "Films")
         return stats
@@ -345,38 +350,38 @@ class MediaOrganizer:
         stats = self._stats_vides()
         print(color("\n🎌 Scan des animés…\n", C.VIOLET))
 
-        for f in os.listdir(MEDIA_SOURCE):
-            if not f.lower().endswith(VIDEO_EXT):
+        for source in SOURCE_DIRS:
+            if not os.path.exists(source):
                 continue
-            stats["scan"] += 1
-            if not self._is_anime(f.lower()):
-                continue
-
-            saison, ep = self._extraire_episode(f)
-            anime = self._nom_serie(f)
-
-            if ep:
-                saison = saison or "01"
-                dest = os.path.join(ANIMES_DIR, anime, f"Saison {saison}")
-                os.makedirs(dest, exist_ok=True)
-                ext = os.path.splitext(f)[1]
-                new = f"{anime} S{saison}E{ep}{ext}"
-                res = self._move_safe(
-                    os.path.join(MEDIA_SOURCE, f),
-                    os.path.join(dest, new),
-                    stats
-                )
-            else:
-                dest = os.path.join(ANIMES_DIR, anime)
-                os.makedirs(dest, exist_ok=True)
-                res = self._move_safe(
-                    os.path.join(MEDIA_SOURCE, f),
-                    os.path.join(dest, f),
-                    stats
-                )
-                new = f
-
-            print(f"  {res}  →  {new}")
+            for f in os.listdir(source):
+                if not f.lower().endswith(VIDEO_EXT):
+                    continue
+                stats["scan"] += 1
+                if not self._is_anime(f.lower()):
+                    continue
+                saison, ep = self._extraire_episode(f)
+                anime = self._nom_serie(f)
+                if ep:
+                    saison = saison or "01"
+                    dest = os.path.join(ANIMES_DIR, anime, f"Saison {saison}")
+                    os.makedirs(dest, exist_ok=True)
+                    ext = os.path.splitext(f)[1]
+                    new = f"{anime} S{saison}E{ep}{ext}"
+                    res = self._move_safe(
+                        os.path.join(source, f),
+                        os.path.join(dest, new),
+                        stats
+                    )
+                else:
+                    dest = os.path.join(ANIMES_DIR, anime)
+                    os.makedirs(dest, exist_ok=True)
+                    new = f
+                    res = self._move_safe(
+                        os.path.join(source, f),
+                        os.path.join(dest, f),
+                        stats
+                    )
+                print(f"  {res}  →  {new}")
 
         self._afficher_resume(stats, "Animés")
         return stats
@@ -401,23 +406,121 @@ class MediaOrganizer:
                 f"✅ Médiathèque : {total} fichier(s) organisé(s) !"
             )
 
+    # ---- Recherche dans la médiathèque ----
+    def chercher(self, query):
+        query = query.lower().strip()
+        print(color(f"\n🔍 Recherche : '{query}'\n", C.CYAN))
+
+        resultats = []
+        dossiers  = [SERIES_DIR, FILMS_DIR, ANIMES_DIR, MANGAS_DIR]
+        noms      = ["Séries", "Films", "Animés", "Mangas"]
+
+        for dossier, nom in zip(dossiers, noms):
+            if not os.path.exists(dossier):
+                continue
+            for root, dirs, files in os.walk(dossier):
+                for f in files:
+                    if not f.lower().endswith(VIDEO_EXT):
+                        continue
+                    if query in f.lower() or query in root.lower():
+                        chemin_relatif = os.path.relpath(
+                            os.path.join(root, f), MEDIA_BASE
+                        )
+                        resultats.append((nom, chemin_relatif, f))
+
+        if not resultats:
+            print(color(f"  ❌ Aucun résultat pour '{query}'\n", C.ROUGE))
+            return
+
+        # Grouper par catégorie
+        categories = {}
+        for cat, chemin, fichier in resultats:
+            categories.setdefault(cat, []).append((chemin, fichier))
+
+        total = 0
+        for cat, items in categories.items():
+            emoji = {"Séries": "📺", "Films": "🎬",
+                     "Animés": "🎌", "Mangas": "📚"}.get(cat, "📁")
+            print(color(f"{emoji} {cat} ({len(items)})", C.BLEU))
+            for chemin, fichier in sorted(items):
+                print(f"   • {chemin}")
+            total += len(items)
+
+        print(color(f"\n  ✅ {total} résultat(s) trouvé(s)\n", C.VERT))
+
+    # ---- Statistiques médiathèque ----
+    def stats_media(self):
+        print(color("\n📊 STATISTIQUES MÉDIATHÈQUE\n", C.CYAN))
+
+        categories = {
+            "📺 Séries":  SERIES_DIR,
+            "🎬 Films":   FILMS_DIR,
+            "🎌 Animés":  ANIMES_DIR,
+            "📚 Mangas":  MANGAS_DIR,
+        }
+
+        total_fichiers = 0
+        total_taille   = 0
+
+        for nom, dossier in categories.items():
+            if not os.path.exists(dossier):
+                print(f"  {nom} : 0 fichier (dossier vide)")
+                continue
+
+            fichiers = []
+            taille   = 0
+            series_set = set()
+
+            for root, dirs, files in os.walk(dossier):
+                for f in files:
+                    if f.lower().endswith(VIDEO_EXT):
+                        chemin = os.path.join(root, f)
+                        fichiers.append(f)
+                        taille += os.path.getsize(chemin)
+                        # Nom de la série/animé = premier dossier
+                        rel = os.path.relpath(root, dossier)
+                        series_set.add(rel.split(os.sep)[0])
+
+            taille_gb = taille / (1024 ** 3)
+            total_fichiers += len(fichiers)
+            total_taille   += taille
+
+            if "Films" in nom:
+                print(color(f"  {nom}", C.BLEU))
+                print(f"    Films     : {len(fichiers)}")
+                print(f"    Taille    : {taille_gb:.1f} Go")
+            else:
+                print(color(f"  {nom}", C.BLEU))
+                print(f"    Titres    : {len(series_set)}")
+                print(f"    Épisodes  : {len(fichiers)}")
+                print(f"    Taille    : {taille_gb:.1f} Go")
+            print()
+
+        total_gb = total_taille / (1024 ** 3)
+        print(color(f"  TOTAL : {total_fichiers} fichier(s) — {total_gb:.1f} Go\n", C.VERT))
+
     # ---- Scanner sans déplacer ----
     def scanner(self):
         print(color("\n🔍 Scan en mode aperçu (aucun fichier déplacé)…\n", C.CYAN))
         trouve = {"series": [], "films": [], "animes": [], "inconnus": []}
 
-        for f in os.listdir(MEDIA_SOURCE):
-            if not f.lower().endswith(VIDEO_EXT):
+        for source in SOURCE_DIRS:
+            if not os.path.exists(source):
+                print(color(f"  ⚠ Dossier introuvable : {source}", C.JAUNE))
                 continue
-            t = self._detect_type(f)
-            if t == "anime":
-                trouve["animes"].append(f)
-            elif t == "serie":
-                trouve["series"].append(f)
-            elif t == "film":
-                trouve["films"].append(f)
-            else:
-                trouve["inconnus"].append(f)
+            print(color(f"  📂 Source : {source}", C.BLEU))
+            for f in os.listdir(source):
+                if not f.lower().endswith(VIDEO_EXT):
+                    continue
+                t = self._detect_type(f)
+                if t == "anime":
+                    trouve["animes"].append(f)
+                elif t == "serie":
+                    trouve["series"].append(f)
+                elif t == "film":
+                    trouve["films"].append(f)
+                else:
+                    trouve["inconnus"].append(f)
 
         for cat, files in trouve.items():
             if files:
@@ -963,6 +1066,8 @@ def print_help():
 ║  animes                 Organiser animés     ║
 ║  organiser              Tout organiser       ║
 ║  scanner                Aperçu sans déplacer ║
+║  cherche <nom>          Rechercher un titre  ║
+║  stats media            Stats bibliothèque   ║
 ╠══════════════════════════════════════════════╣
 ║  APPLICATIONS                                ║
 ║  ouvre <app>            Ouvrir une app       ║
@@ -1114,6 +1219,16 @@ class DiabloOS:
 
         elif cmd == "scanner":
             self.media.scanner()
+
+        elif cmd == "stats media":
+            self.media.stats_media()
+
+        elif cmd.startswith("cherche "):
+            query = raw[8:].strip()
+            if query:
+                self.media.chercher(query)
+            else:
+                print("Usage : cherche <nom du film/série/animé>")
 
         # ---- Apps ----
         elif cmd.startswith("ouvre "):
