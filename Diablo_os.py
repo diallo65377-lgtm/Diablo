@@ -20,7 +20,7 @@ except ImportError:
 # =========================
 # CONFIG
 # =========================
-VERSION = "5.6.0"
+VERSION = "5.7.0"
 BASE_DIR = Path.home()
 MEMORY_FILE = BASE_DIR / "diablo_memory.json"
 BACKUP_FILE = BASE_DIR / "diablo_memory.bak.json"
@@ -34,8 +34,8 @@ LOW_BATTERY_THRESHOLD = 15
 CRITICAL_BATTERY_THRESHOLD = 5
 
 # Groq API
-GROQ_MODEL    = "llama-3.1-8b-instant"
-GROQ_API_URL  = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL     = "llama-3.1-8b-instant"
+GROQ_API_URL   = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MAX_TOKENS = 512
 GROQ_HISTORY_MAX = 10
 
@@ -43,7 +43,7 @@ GROQ_HISTORY_MAX = 10
 BATTERY_AI_THRESHOLD = 20
 BATTERY_AI_INTERVAL  = 300
 
-# Actions reconnues par la commande naturelle
+# Actions reconnues par langage naturel
 NATURAL_ACTIONS = {
     "TORCH_ON", "TORCH_OFF",
     "WIFI_ON",  "WIFI_OFF",
@@ -51,6 +51,53 @@ NATURAL_ACTIONS = {
     "VIBRATE",  "PHOTO",
     "SCREENSHOT", "RIEN",
 }
+
+# =========================
+# APPS CONNUES
+# Nom reconnu → package Android
+# =========================
+KNOWN_APPS = {
+    # Réseaux sociaux
+    "youtube":      "com.google.android.youtube",
+    "whatsapp":     "com.whatsapp",
+    "tiktok":       "com.zhiliaoapp.musically",
+    "instagram":    "com.instagram.android",
+    "facebook":     "com.facebook.katana",
+    "twitter":      "com.twitter.android",
+    "telegram":     "org.telegram.messenger",
+    "snapchat":     "com.snapchat.android",
+
+    # Google
+    "chrome":       "com.android.chrome",
+    "maps":         "com.google.android.apps.maps",
+    "gmail":        "com.google.android.gm",
+    "drive":        "com.google.android.apps.docs",
+    "play":         "com.android.vending",
+    "meet":         "com.google.android.apps.meetings",
+
+    # Système Android
+    "parametres":   "com.android.settings",
+    "paramètres":   "com.android.settings",
+    "camera":       "com.android.camera2",
+    "caméra":       "com.android.camera2",
+    "galerie":      "com.android.gallery3d",
+    "contacts":     "com.android.contacts",
+    "telephone":    "com.android.dialer",
+    "téléphone":    "com.android.dialer",
+    "sms":          "com.android.mms",
+    "calculatrice": "com.android.calculator2",
+    "horloge":      "com.android.deskclock",
+    "agenda":       "com.android.calendar",
+    "fichiers":     "com.android.documentsui",
+    "musique":      "com.android.music",
+
+    # Autres
+    "spotify":      "com.spotify.music",
+    "netflix":      "com.netflix.mediaclient",
+    "amazon":       "com.amazon.mShop.android.shopping",
+    "termux":       "com.termux",
+}
+
 
 # =========================
 # LOGGING
@@ -83,6 +130,7 @@ log      = logger.info
 log_warn = logger.warning
 log_err  = logger.error
 log_dbg  = logger.debug
+
 
 # =========================
 # MÉMOIRE
@@ -159,7 +207,6 @@ class NeuralMemory:
             self._atomic_save(self.data)
 
     def learn(self, action):
-        # On n'enregistre pas les actions IA dans les patterns
         if action in ("ASK_IA", "BATTERY_AI", "ASK_CLAUDE"):
             return
         hour = str(datetime.now().hour)
@@ -280,6 +327,28 @@ class TermuxAPI:
         log_warn(f"Action inconnue : {action}")
         return False
 
+    def open_app(self, package):
+        """Ouvre une application Android par son nom de package."""
+        try:
+            subprocess.Popen(
+                ["am", "start", "-n",
+                 f"{package}/{package}.MainActivity"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            # Si la première méthode échoue, essaie avec monkey
+            time.sleep(0.5)
+            subprocess.Popen(
+                ["monkey", "-p", package, "-c",
+                 "android.intent.category.LAUNCHER", "1"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            return True
+        except Exception as e:
+            log_err(f"Erreur ouverture app : {e}")
+            return False
+
     def send_sms(self, number, message):
         clean = number.lstrip("+")
         if not clean.isdigit():
@@ -391,20 +460,15 @@ class GroqAssistant:
             messages = list(self._history)
 
         print("⚡ Groq réfléchit…", flush=True)
-
         answer = self._call(messages)
         if answer:
             with self._lock:
                 self._history.append({"role": "assistant", "content": answer})
             return answer
-
         return "Erreur : impossible de contacter l'IA."
 
     def understand_command(self, phrase):
-        """
-        Comprend une phrase en langage naturel et retourne
-        une action hardware ou RIEN.
-        """
+        """Comprend une phrase et retourne une action hardware ou RIEN."""
         actions_list = ", ".join(sorted(NATURAL_ACTIONS))
         prompt = (
             f"L'utilisateur dit : \"{phrase}\"\n\n"
@@ -423,10 +487,37 @@ class GroqAssistant:
             max_tokens=20,
         )
         if result:
-            # Nettoyer la réponse — garder seulement le mot en majuscules
             action = result.strip().upper().split()[0]
             if action in NATURAL_ACTIONS:
                 return action
+        return None
+
+    def understand_app(self, phrase):
+        """
+        Comprend une phrase et retourne le nom d'une app connue.
+        Ex: 'je veux regarder des vidéos' → 'youtube'
+        """
+        apps_list = ", ".join(sorted(KNOWN_APPS.keys()))
+        prompt = (
+            f"L'utilisateur dit : \"{phrase}\"\n\n"
+            f"Applications disponibles : {apps_list}\n\n"
+            "Quelle application l'utilisateur veut-il ouvrir ?\n"
+            "Réponds avec UN SEUL nom d'application de la liste, en minuscules.\n"
+            "Si aucune application ne correspond, réponds : RIEN"
+        )
+        result = self._call(
+            [{"role": "user", "content": prompt}],
+            system_prompt=(
+                "Tu es un interpréteur d'intention pour Diablo OS. "
+                "Tu identifies quelle application l'utilisateur veut ouvrir. "
+                "Réponds UNIQUEMENT avec le nom de l'app en minuscules, sans explication."
+            ),
+            max_tokens=20,
+        )
+        if result:
+            app = result.strip().lower().split()[0]
+            if app in KNOWN_APPS:
+                return app
         return None
 
     def analyze_battery(self, bat):
@@ -465,8 +556,8 @@ class GroqAssistant:
                 return "Aucun historique de conversation."
             lines = []
             for msg in self._history:
-                role  = "Aladji" if msg["role"] == "user" else "Diablo"
-                texte = msg["content"]
+                role   = "Aladji" if msg["role"] == "user" else "Diablo"
+                texte  = msg["content"]
                 apercu = texte[:100] + ("…" if len(texte) > 100 else "")
                 lines.append(f"[{role}] {apercu}")
             return "\n".join(lines)
@@ -477,9 +568,9 @@ class GroqAssistant:
 # =========================
 class ExecutiveBrain:
     def __init__(self, api, memory, ia):
-        self.api     = api
-        self.memory  = memory
-        self.ia      = ia
+        self.api      = api
+        self.memory   = memory
+        self.ia       = ia
         self._running = True
         self._last    = {}
         self._stop    = threading.Event()
@@ -519,15 +610,13 @@ class ExecutiveBrain:
             log(f"IA batterie activée ({level}%)")
             result = self.ia.analyze_battery(bat)
             if result:
-                parts     = result.split("|", 1)
-                action    = parts[0].strip().upper()
-                raison    = parts[1].strip() if len(parts) > 1 else ""
+                parts  = result.split("|", 1)
+                action = parts[0].strip().upper()
+                raison = parts[1].strip() if len(parts) > 1 else ""
                 log(f"IA décision : {action} — {raison}")
-                if action == "RIEN":
-                    pass
-                elif action == "NOTIFY":
+                if action == "NOTIFY":
                     self.api.execute("NOTIFY", raison or f"Batterie {level}%")
-                elif action in NATURAL_ACTIONS:
+                elif action in NATURAL_ACTIONS and action != "RIEN":
                     self.api.execute(action)
                     self.api.execute("NOTIFY", f"IA: {action} — {raison}")
 
@@ -614,6 +703,14 @@ def print_help():
 ╔══════════════════════════════════════════════╗
 ║       DIABLO OS v{VERSION} — COMMANDES        ║
 ╠══════════════════════════════════════════════╣
+║  APPLICATIONS                                ║
+║  ouvre youtube          Ouvrir YouTube       ║
+║  ouvre whatsapp         Ouvrir WhatsApp      ║
+║  ouvre chrome           Ouvrir Chrome        ║
+║  ouvre paramètres       Ouvrir Paramètres    ║
+║  ouvre caméra           Ouvrir Caméra        ║
+║  apps                   Liste des apps       ║
+╠══════════════════════════════════════════════╣
 ║  CONTRÔLE EXACT                              ║
 ║  lampe on / lampe off   Torche               ║
 ║  wifi on / wifi off     Wi-Fi                ║
@@ -622,16 +719,15 @@ def print_help():
 ║  photo                  Photo caméra         ║
 ║  screenshot             Capture d'écran      ║
 ╠══════════════════════════════════════════════╣
-║  LANGAGE NATUREL (nouveau !)                 ║
+║  LANGAGE NATUREL                             ║
 ║  hey allume la lampe    Diablo comprend !    ║
-║  coupe le wifi stp      Langage libre        ║
-║  prends une photo       Pas besoin d'exact   ║
+║  ouvre moi youtube stp  Langage libre        ║
+║  je veux écouter Spotify                     ║
 ╠══════════════════════════════════════════════╣
 ║  COMMUNICATION                               ║
 ║  dit <texte>            Synthèse vocale      ║
 ║  sms <num> <msg>        Envoyer un SMS       ║
 ║  notif <msg>            Notification         ║
-║  ouvre <url/app>        Ouvrir ressource     ║
 ║  presse-papier          Lire le clipboard    ║
 ║  localisation           Position GPS         ║
 ║  batterie               État batterie        ║
@@ -682,6 +778,28 @@ class DiabloOS:
             sys.exit(0)
         signal.signal(signal.SIGINT,  _quit)
         signal.signal(signal.SIGTERM, _quit)
+
+    def _launch_app(self, name):
+        """Lance une app par son nom. Retourne True si trouvée."""
+        name = name.lower().strip()
+
+        # 1. Correspondance exacte dans KNOWN_APPS
+        if name in KNOWN_APPS:
+            package = KNOWN_APPS[name]
+            print(f"📱 Ouverture de {name}…")
+            self.api.open_app(package)
+            log(f"App ouverte : {name} ({package})")
+            return True
+
+        # 2. Correspondance partielle
+        for key, package in KNOWN_APPS.items():
+            if name in key or key in name:
+                print(f"📱 Ouverture de {key}…")
+                self.api.open_app(package)
+                log(f"App ouverte : {key} ({package})")
+                return True
+
+        return False
 
     def start(self):
         try:
@@ -748,6 +866,32 @@ class DiabloOS:
         elif cmd == "photo":      action = "PHOTO"
         elif cmd == "screenshot": action = "SCREENSHOT"
 
+        # ---- Ouvrir une app ----
+        elif cmd.startswith("ouvre "):
+            app_name = raw[6:].strip().lower()
+            found = self._launch_app(app_name)
+            if not found:
+                # L'IA essaie de deviner
+                if self.memory.get_tag("groq_api_key"):
+                    print("🧠 App inconnue, je demande à l'IA…")
+                    detected = self.ia.understand_app(app_name)
+                    if detected:
+                        print(f"✅ Compris : {detected}")
+                        self._launch_app(detected)
+                    else:
+                        print(f"❌ App '{app_name}' introuvable.")
+                        print("   Tapez 'apps' pour voir la liste.")
+                else:
+                    print(f"❌ App '{app_name}' introuvable.")
+                    print("   Tapez 'apps' pour voir la liste.")
+
+        # ---- Liste des apps ----
+        elif cmd == "apps":
+            print("\n📱 Applications disponibles :\n")
+            for name in sorted(KNOWN_APPS.keys()):
+                print(f"   ouvre {name}")
+            print()
+
         elif cmd.startswith("dit "):
             text = raw[4:].strip()
             if text:
@@ -761,9 +905,6 @@ class DiabloOS:
                 self.api.execute("NOTIFY", msg)
             else:
                 print("Usage : notif <message>")
-
-        elif cmd.startswith("ouvre "):
-            self.api.execute("OPEN", raw[6:].strip())
 
         elif cmd.startswith("sms "):
             parts = raw.split(maxsplit=2)
@@ -818,7 +959,7 @@ class DiabloOS:
                 else:
                     print("Annulé.")
             else:
-                print("L'IA n'a pas pu analyser (clé API configurée ?)")
+                print("L'IA n'a pas pu analyser.")
 
         elif cmd.startswith("ask "):
             question = raw[4:].strip()
@@ -899,9 +1040,18 @@ class DiabloOS:
             sys.exit(0)
 
         else:
-            # ---- Langage naturel — l'IA comprend la phrase ----
+            # ---- Langage naturel ----
             if self.memory.get_tag("groq_api_key"):
-                print("🧠 Je ne connais pas cette commande, je demande à l'IA…")
+                print("🧠 Je réfléchis…", flush=True)
+
+                # 1. L'IA essaie de deviner une app
+                app = self.ia.understand_app(raw)
+                if app:
+                    print(f"📱 Compris : ouvrir {app}")
+                    self._launch_app(app)
+                    return
+
+                # 2. L'IA essaie de deviner une action hardware
                 detected = self.ia.understand_command(raw)
                 if detected and detected != "RIEN":
                     print(f"✅ Compris : {detected}")
